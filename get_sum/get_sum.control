@@ -1,0 +1,5 @@
+# get_sum postgresql extension
+comment = 'simple sum of two integers for postgres extension using c'
+default_version = '0.0.1'
+module_pathname = '$libdir/get_sum'
+relocatable = false
