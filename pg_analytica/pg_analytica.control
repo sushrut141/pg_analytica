@@ -1,0 +1,5 @@
+# pg_analytica postgresql extension
+comment = 'Extension to create columnar datastore from an existing Postgres table.'
+default_version = '0.0.1'
+module_pathname = '$libdir/pg_analytica'
+relocatable = false
