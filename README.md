@@ -30,7 +30,8 @@ The output should be:
 
 
 ## Running a sample extension
-Create a new directory and place four files there named get_sum.c, get_sum.control, Makefile and get_sum--0.0.1.sql.
+
+Create a new directory and place four files there named pg_analytica.c, pg_analytica.control, Makefile and pg_analytica--0.0.1.sql.
 
 Run make command in the above directory:  
 
@@ -38,6 +39,17 @@ Run make command in the above directory:
 make CC='/usr/bin/gcc'
 make install
 ```
+
+## Generate sample data for testing
+
+Run the below command.
+
+```
+psql postgres -f test.sql
+```
+
+This creates a table and populates sample rows that can used in testing.
+
 ## Testing the extension
 
 Add tests to the test.sql file.
