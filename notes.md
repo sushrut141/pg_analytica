@@ -11,6 +11,6 @@ Maybe we can keep track of the oldest txn id ingested and query rows with txn id
 
  - pg_analytica extension defines a custom table access method
     - When used the following methods are called
-        - memam_relation_set_new_filelocator
-        - memam_relation_needs_toast_table
-        - memam_tuple_insert called for each row in source table
+        - `memam_relation_set_new_filelocator`
+        - `memam_relation_needs_toast_table`
+        - `memam_tuple_insert` called for each row in source table

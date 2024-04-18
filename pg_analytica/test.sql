@@ -4,4 +4,4 @@ CREATE EXTENSION pg_analytica;
 
 CREATE TABLE columnar_distributors
 USING pg_analytica_am
-AS SELECT * FROM distributors;
+AS SELECT did, name FROM distributors;

@@ -85,7 +85,25 @@ static void memam_tuple_insert(
   int options,
   struct BulkInsertStateData* bistate
 ) {
-	DEBUG_FUNC();
+	fprintf(fd, "in %s\n", __func__);
+	fprintf(fd, "reading from table %s \n", relation->rd_rel->relname.data);
+	fprintf(fd, "found %d attributes in tuple descriptor \n", slot->tts_tupleDescriptor->natts);
+	fprintf(fd, "found %d valid attributes in tuple \n", slot->tts_nvalid);
+	int stride = sizeof(Datum);
+	for (int i = 0; i < slot->tts_tupleDescriptor->natts; i += 1) {
+		Datum* data_ptr = slot->tts_values + (i * stride);
+		switch (slot->tts_tupleDescriptor->attrs[i].atttypid) {
+			case INT2OID:
+			case INT4OID:
+			case INT8OID:
+				fprintf(fd, "found int value with name %s\n", slot->tts_tupleDescriptor->attrs[i].attname.data);
+				break;
+			default:
+				fprintf(fd, "found some other type with name %s\n", slot->tts_tupleDescriptor->attrs[i].attname.data);
+				break;
+		}	
+	}
+	fprintf(fd, "end of function %s\n", __func__);
 }
 
 static void memam_tuple_insert_speculative(
