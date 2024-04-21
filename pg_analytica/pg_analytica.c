@@ -5,6 +5,7 @@
 
 
 #include "access/tableam.h"
+#include "utils/builtins.h"
 
 FILE* fd;
 #define DEBUG_FUNC() fprintf(fd, "in %s\n", __func__);
@@ -14,7 +15,7 @@ static const TupleTableSlotOps* memam_slot_callbacks(
   Relation relation
 ) {
 	DEBUG_FUNC();
-  return NULL;
+  return &TTSOpsVirtual;
 }
 
 static TableScanDesc memam_beginscan(
@@ -76,34 +77,6 @@ static bool memam_index_fetch_tuple(
 ) {
 	DEBUG_FUNC();
   return false;
-}
-
-static void memam_tuple_insert(
-  Relation relation,
-  TupleTableSlot *slot,
-  CommandId cid,
-  int options,
-  struct BulkInsertStateData* bistate
-) {
-	fprintf(fd, "in %s\n", __func__);
-	fprintf(fd, "reading from table %s \n", relation->rd_rel->relname.data);
-	fprintf(fd, "found %d attributes in tuple descriptor \n", slot->tts_tupleDescriptor->natts);
-	fprintf(fd, "found %d valid attributes in tuple \n", slot->tts_nvalid);
-	int stride = sizeof(Datum);
-	for (int i = 0; i < slot->tts_tupleDescriptor->natts; i += 1) {
-		Datum* data_ptr = slot->tts_values + (i * stride);
-		switch (slot->tts_tupleDescriptor->attrs[i].atttypid) {
-			case INT2OID:
-			case INT4OID:
-			case INT8OID:
-				fprintf(fd, "found int value with name %s\n", slot->tts_tupleDescriptor->attrs[i].attname.data);
-				break;
-			default:
-				fprintf(fd, "found some other type with name %s\n", slot->tts_tupleDescriptor->attrs[i].attname.data);
-				break;
-		}	
-	}
-	fprintf(fd, "end of function %s\n", __func__);
 }
 
 static void memam_tuple_insert_speculative(
@@ -360,6 +333,83 @@ static bool memam_scan_sample_next_tuple(
   return false;
 }
 
+static Size parallelscan_estimate (Relation rel) {
+	DEBUG_FUNC();
+	return 10000;
+}
+
+static Size parallelscan_initialize(Relation rel,
+									ParallelTableScanDesc pscan) {
+	DEBUG_FUNC();
+	return 10000;									
+}
+
+static void parallelscan_reinitialize(Relation rel,
+									ParallelTableScanDesc pscan) {
+	DEBUG_FUNC();
+}
+
+static uint64 relation_size (Relation rel, ForkNumber forkNumber) {
+	DEBUG_FUNC();
+	return 10000;
+}
+
+static void memam_tuple_insert(
+  Relation relation,
+  TupleTableSlot *slot,
+  CommandId cid,
+  int options,
+  struct BulkInsertStateData* bistate
+) {
+	fprintf(fd, "in %s\n", __func__);
+	fprintf(fd, "reading from table %s \n", relation->rd_rel->relname.data);
+	fprintf(fd, "found %d attributes in tuple descriptor \n", slot->tts_tupleDescriptor->natts);
+
+	bool shouldFree = true;
+	HeapTuple	tuple = ExecFetchSlotHeapTuple(slot, true, &shouldFree);
+	int num_of_attributes = slot->tts_tupleDescriptor->natts;
+	fprintf(fd, "Iterating over %d columns \n", num_of_attributes);
+
+	fprintf(fd, "Row ");
+	for (int i = 0; i < num_of_attributes; i += 1) {
+		switch (slot->tts_tupleDescriptor->attrs[i].atttypid) {
+			case INT2OID:
+			case INT4OID:
+			case INT8OID:
+			{
+				bool isnull;
+				Datum column_data = heap_getattr(tuple, i + 1, slot->tts_tupleDescriptor, &isnull);
+				if (!isnull) {
+					int column_value = DatumGetUInt32(column_data);
+					fprintf(fd, "%d |", column_value);
+				} else {
+					fprintf(fd, "null |");
+				}
+				break;
+			}
+			case VARCHAROID:
+			{
+				bool isnull;
+				Datum column_data = heap_getattr(tuple, i + 1, slot->tts_tupleDescriptor, &isnull);
+				if (!isnull) {
+					char* column_value = TextDatumGetCString(column_data);
+					fprintf(fd, "%s |", column_value);
+				} else {
+					fprintf(fd, "null |");
+				}
+				break;
+			}
+			default:
+				fprintf(fd, "found some other type with name %s\n", slot->tts_tupleDescriptor->attrs[i].attname.data);
+				break;
+		}	
+	}
+	if (shouldFree)
+		pfree(tuple);
+	fprintf(fd, "\n");
+	fprintf(fd, "end of function %s\n", __func__);
+}
+
 const TableAmRoutine customam_methods = {
   .type = T_TableAmRoutine,
 
@@ -370,9 +420,9 @@ const TableAmRoutine customam_methods = {
   .scan_rescan = memam_rescan,
   .scan_getnextslot = memam_getnextslot,
 
-  .parallelscan_estimate = NULL,
-  .parallelscan_initialize = NULL,
-  .parallelscan_reinitialize = NULL,
+  .parallelscan_estimate = parallelscan_estimate,
+  .parallelscan_initialize = parallelscan_initialize,
+  .parallelscan_reinitialize = parallelscan_reinitialize,
 
   .index_fetch_begin = memam_index_fetch_begin,
   .index_fetch_reset = memam_index_fetch_reset,
@@ -403,7 +453,7 @@ const TableAmRoutine customam_methods = {
   .index_build_range_scan = memam_index_build_range_scan,
   .index_validate_scan = memam_index_validate_scan,
 
-  .relation_size = NULL,
+  .relation_size = relation_size,
   .relation_needs_toast_table = memam_relation_needs_toast_table,
   .relation_toast_am = memam_relation_toast_am,
   .relation_fetch_toast_slice = memam_fetch_toast_slice,

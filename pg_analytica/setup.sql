@@ -1,3 +1,5 @@
+DROP TABLE distributors;
+
 CREATE TABLE distributors (
     did     integer,
     name    varchar(40)
