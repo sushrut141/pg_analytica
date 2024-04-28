@@ -1,0 +1,5 @@
+# ingestor postgresql extension
+comment = 'Extension to create columnar store from table in background worker.'
+default_version = '0.0.1'
+module_pathname = '$libdir/ingestor'
+relocatable = true

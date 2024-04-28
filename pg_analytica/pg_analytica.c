@@ -196,16 +196,6 @@ static TransactionId memam_index_delete_tuples(
   return id;
 }
 
-static void memam_relation_set_new_filelocator(
-  Relation rel,
-  const RelFileNode *newrlocator,
-  char persistence,
-  TransactionId *freezeXid,
-  MultiXactId *minmulti
-) {
-	DEBUG_FUNC();
-}
-
 static void memam_relation_nontransactional_truncate(
   Relation rel
 ) {
@@ -409,6 +399,18 @@ static void memam_tuple_insert(
 	fprintf(fd, "\n");
 	fprintf(fd, "end of function %s\n", __func__);
 }
+
+static void memam_relation_set_new_filelocator(
+  Relation rel,
+  const RelFileNode *newrlocator,
+  char persistence,
+  TransactionId *freezeXid,
+  MultiXactId *minmulti
+) {
+	Assert(persistence == RELPERSISTENCE_PERMANENT);
+	DEBUG_FUNC();
+}
+
 
 const TableAmRoutine customam_methods = {
   .type = T_TableAmRoutine,
