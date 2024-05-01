@@ -75,11 +75,6 @@ ingestor_main()
 	int offset = 0;
 	int processed_count;
 	int select;
-	// Oid dboid;
-	// Oid roleoid;
-	// dboid = get_database_oid("postgres", false);
-	// roleoid = get_role_oid("sushrutshivaswamy", false);
-	// elog(LOG, "Connecting to database %d with role %d", dboid, roleoid);
 
 	bits32		flags = 0;
 	BackgroundWorkerUnblockSignals();
