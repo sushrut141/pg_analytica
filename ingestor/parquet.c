@@ -15,7 +15,7 @@ GArrowArray* create_int64_array(const int *data, int num_values, GError *error) 
     
     for (int i = 0; i < num_values; i++) {
         int value = data[i];
-        if (value == NULL) {
+        if (value == 0) {
           value = 0;
         }
         garrow_int32_array_builder_append_value(int_array_builder, value, &inner_error);
@@ -36,7 +36,7 @@ GArrowArray* create_string_array(const char **data, int num_values, GError *erro
 
     for (int i = 0; i < num_values; i++) {
         char* value = data[i];
-        if (value == NULL) {
+        if (value == 0) {
           value = "";
         }
         garrow_string_array_builder_append_value(string_array_builder, value, &inner_error);

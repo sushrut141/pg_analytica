@@ -41,7 +41,7 @@ PGDLLEXPORT void ingestor_main(void) pg_attribute_noreturn();
 /* Stores information about column names and column types. */
 typedef struct _ColumnInfo {
 	char column_name[MAX_COLUMN_NAME_CHARS];
-	char column_type[MAX_COLUMN_NAME_CHARS];
+	Oid column_type;
 } ColumnInfo;
 
 /** 
@@ -52,45 +52,50 @@ typedef struct _ColumnInfo {
 static ColumnInfo* get_column_types(int* num_of_columns) {
 	StringInfoData buf;
 	initStringInfo(&buf);
-	appendStringInfo(&buf, "SELECT column_name, data_type FROM distributors;");
+	appendStringInfo(&buf, "SELECT attname, atttypid FROM pg_attribute WHERE attrelid = 'distributors'::regclass AND attnum > 0;");
 	int status = SPI_execute(buf.data, true, 0);
-	elog(LOG, "Executed SPI_execute query %s with status %d", buf.data, select);
+	elog(LOG, "Executed SPI_execute query %s with status %d", buf.data, status);
 	if (status != SPI_OK_SELECT) {
 		ereport(ERROR, (errcode(ERRCODE_CONNECTION_FAILURE),
 					errmsg("Failed to deduce column types")));
 	}
+	elog(LOG, "Found %d processed rows", SPI_processed);
+	elog(LOG, "Found %d values in result", SPI_tuptable->numvals);
+	elog(LOG, "Type of column 1 is %d", SPI_tuptable->tupdesc->attrs[0].atttypid);
+	elog(LOG, "Type of column 2 is %d", SPI_tuptable->tupdesc->attrs[1].atttypid);
 	bool isnull;
-	ColumnInfo* columns = palloc_array(ColumnInfo, MAX_SUPPORTED_COLUMNS);
+	ColumnInfo* columns = palloc_array(ColumnInfo, SPI_processed);
 	for (int i = 0; i < SPI_processed; i += 1) {
 		ColumnInfo column_info;
 		Datum column_name_data = SPI_getbinval(SPI_tuptable->vals[i], SPI_tuptable->tupdesc, 1, &isnull);
-		char* column_name_value = TextDatumGetCString(column_name_data);
+		Name column_name = DatumGetName(column_name_data);
+		char* column_name_value = column_name->data;
+		elog(LOG, "Acquired column name as %s", column_name_value);
 
-		Datum column_type_data = SPI_getbinval(SPI_tuptable->vals[i], SPI_tuptable->tupdesc, 1, &isnull);
-		char* column_type_value = TextDatumGetCString(column_type_data);
-
-		Assert(strlen(column_name_value < MAX_COLUMN_NAME_CHARS));
-		Assert(strlen(column_type_value < MAX_COLUMN_NAME_CHARS));
+		Datum column_type_data = SPI_getbinval(SPI_tuptable->vals[i], SPI_tuptable->tupdesc, 2, &isnull);
+		Oid column_type_value = DatumGetObjectId(column_type_data);
+		elog(LOG, "Acquired column type as %d", column_type_value);
 
 		strcpy(column_info.column_name, column_name_value);
-		strcpy(column_info.column_name, column_type_value);
+		column_info.column_type =  column_type_value;
 
 		columns[i] = column_info;
 	}
 	*num_of_columns = SPI_processed;
+	elog(LOG, "Finished extracting column types");
 	return columns;
 }
 
 /**
  * Return the type of the column based on name.
  */
-static const char* get_column_type_for(const char *name, ColumnInfo* columns, int num_columns) {
+static Oid get_column_type_for(const char *name, ColumnInfo* columns, int num_columns) {
 	for (int i = 0; i < num_columns; i += 1) {
 		if (strcmp(columns[i].column_name, name)) {
 			return columns[i].column_type;
 		}
 	}
-	return NULL;
+	return 0;
 }
 
 /*
@@ -106,32 +111,27 @@ static GArrowSchema* create_table_schema(const ColumnInfo *column_info, int num_
     temp = garrow_schema_new(fields);
 	for (int i = 0; i < num_columns; i += 1) {
 		const char *column_name = column_info[i].column_name;
-		const char *column_type = get_column_type_for(column_name, column_info, num_columns);
-		// TODO - try to use postgres type OIDs here like INTOID32
-		// TODO - handle unsigned int
-		/* Integer type */
-		if (strcmp(column_type, "integer")) {
-			GArrowDataType *int_type = garrow_int64_data_type_new();
-			GArrowField *int_field = garrow_field_new(column_name, int_type);
-			temp = garrow_schema_add_field(temp, i, int_field, &error);
-		} else 
-		/* Text type */
-		if (strcmp(column_type, "character varying")) {
-			GArrowDataType *string_type = garrow_string_data_type_new();
-    		GArrowField *string_field = garrow_field_new(column_name, string_type);
-			temp = garrow_schema_add_field(temp, i, string_field, &error);
-		} else 
-		/* Float / Decimal type */
-		if (
-			strcmp(column_type, "double precision") ||
-			strcmp(column_type, "numeric")
-		) {
-			GArrowDataType *double_type = garrow_double_data_type_new();
-			GArrowField *double_field = garrow_field_new(column_name, double_type);
-			temp = garrow_schema_add_field(temp, i, double_field, &error);
-		}  else {
-			elog(LOG, "Unknown column type %s encountered", column_type);
-			return NULL;
+		Oid column_type = get_column_type_for(column_name, column_info, num_columns);
+		switch (column_type) {
+			case INT2OID:
+			case INT4OID:
+			case INT8OID:
+			{
+				GArrowDataType *int_type = garrow_int64_data_type_new();
+				GArrowField *int_field = garrow_field_new(column_name, int_type);
+				temp = garrow_schema_add_field(temp, i, int_field, &error);
+				break;
+			}
+			case VARCHAROID:
+			{
+				GArrowDataType *string_type = garrow_string_data_type_new();
+    			GArrowField *string_field = garrow_field_new(column_name, string_type);
+				temp = garrow_schema_add_field(temp, i, string_field, &error);
+				break;
+			}
+			default:
+				elog(LOG, "Column type %s not yet supported in columnar schema", column_type);
+				break;
 		}
 	}
 	return temp;
@@ -178,7 +178,7 @@ static GArrowTable* create_arrow_table(
 			if (!isnull) {
 				table_data[i][j] = datum;
 			} else {
-				table_data[i][j] = NULL;
+				table_data[i][j] = 0;
 			}
 		}
 	}
@@ -187,26 +187,27 @@ static GArrowTable* create_arrow_table(
 	// Populate arrow arrays for each column
 	for (int i = 0; i < num_columns; i += 1) {
 		const ColumnInfo info = column_info[i];
-		const char *column_type = info.column_type;
-		if (strcmp(column_type, "integer")) {
-			const int64* int_data = create_int64_data_array(table_data[i], SPI_processed);
-			arrow_arrays[i] = create_int64_array(int_data, SPI_processed, error);
-			pfree(int_data);
-		} else 
-		/* Text type */
-		if (strcmp(column_type, "character varying")) {
-			const char** string_data = create_string_data_array(table_data[i], SPI_processed);
-			arrow_arrays[i] = create_string_array(string_data, SPI_processed, error);
-			pfree(string_data);
-		} else 
-		/* Float / Decimal type */
-		if (
-			strcmp(column_type, "double precision") ||
-			strcmp(column_type, "numeric")
-		) {
-			// TODO
-		}  else {
-			// TODO
+		Oid column_type = info.column_type;
+		switch (column_type) {
+			case INT2OID:
+			case INT4OID:
+			case INT8OID:
+			{
+				const int64* int_data = create_int64_data_array(table_data[i], SPI_processed);
+				arrow_arrays[i] = create_int64_array(int_data, SPI_processed, error);
+				pfree(int_data);
+				break;
+			}
+			case VARCHAROID:
+			{
+				const char** string_data = create_string_data_array(table_data[i], SPI_processed);
+				arrow_arrays[i] = create_string_array(string_data, SPI_processed, error);
+				pfree(string_data);
+				break;
+			}
+			default:
+				elog(LOG, "Column type %s not yet supported in columnar schema", column_type);
+				break;
 		}
 	}
 	GArrowTable *table = garrow_table_new_arrays(schema, arrow_arrays, num_columns, &error);
@@ -237,16 +238,22 @@ ingestor_main()
 	BackgroundWorkerUnblockSignals();
 	BackgroundWorkerInitializeConnection("postgres", "sushrutshivaswamy", flags);
 
+	SetCurrentStatementStartTimestamp();
+	StartTransactionCommand();
+	int connection = SPI_connect();
+	if (connection == SPI_ERROR_CONNECT) {
+		ereport(ERROR, (errcode(ERRCODE_CONNECTION_FAILURE),
+					errmsg("Failed to connect to database")));
+	}
+	elog(LOG, "Created connection for query");
+	PushActiveSnapshot(GetTransactionSnapshot());
+
+	int total_columns;
+	elog(LOG, "Trying to extract column types");
+	ColumnInfo *column_info = get_column_types(&total_columns);
+	elog(LOG, "Extracted %d column types", total_columns);
+
 	do {
-		SetCurrentStatementStartTimestamp();
-		StartTransactionCommand();
-		int connection = SPI_connect();
-		if (connection == SPI_ERROR_CONNECT) {
-			ereport(ERROR, (errcode(ERRCODE_CONNECTION_FAILURE),
-						errmsg("Failed to connect to database")));
-		}
-		elog(LOG, "Created connection for query");
-		PushActiveSnapshot(GetTransactionSnapshot());
 
 		StringInfoData buf;
 		initStringInfo(&buf);
@@ -311,11 +318,11 @@ ingestor_main()
 		}
 		// Increment offset by number of processed rows
 		offset += processed_count;
-		SPI_finish();
-		PopActiveSnapshot();
-		CommitTransactionCommand();
-		elog(LOG, "SPI_finish called");
 	} while (processed_count > 0);
+	PopActiveSnapshot();
+	CommitTransactionCommand();
+	SPI_finish();
+	elog(LOG, "SPI_finish called");
 	exit(0);
 }
 
@@ -323,7 +330,6 @@ ingestor_main()
 Datum
 ingestor_launch(PG_FUNCTION_ARGS)
 {
-	setup_logging();
 	// Extract table name
 	char*		table_name = text_to_cstring(PG_GETARG_TEXT_PP(0));
 	Assert(strlen(table_name) > 0);
