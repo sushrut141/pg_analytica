@@ -1,10 +1,5 @@
 CC=gcc
 
-PARQUET_INCLUDE_DIR=/opt/homebrew/Cellar/apache-arrow-glib/16.0.0/include
-ARROW_GLIB_INCLUDE_DIR=/opt/homebrew/Cellar/apache-arrow-glib/16.0.0/include
-GLIB_INCLUDE_DIR=/opt/homebrew/Cellar/glib/2.80.0/include/glib-2.0
-GLIB_INCLUDE_DIR2=/opt/homebrew/Cellar/glib/2.80.0/include/glib-2.0/include
-
 CFLAGS=-g -Wall -O2
 # `pkg-config --list-all | grep -e parquet` will find if installed
 CFLAGS += `pkg-config --cflags parquet-glib`

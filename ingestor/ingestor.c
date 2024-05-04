@@ -1,26 +1,11 @@
-/* -------------------------------------------------------------------------
- *
- * worker_spi.c
- *		Sample background worker code that demonstrates various coding
- *		patterns: establishing a database connection; starting and committing
- *		transactions; using GUC variables, and heeding SIGHUP to reread
- *		the configuration file; reporting to pg_stat_activity; using the
- *		process latch to sleep and exit in case of postmaster death.
- *
- * This code connects to a database, creates a schema and table, and summarizes
- * the numbers contained therein.  To see it working, insert an initial value
- * with "total" type and some initial value; then insert some other rows with
- * "delta" type.  Delta rows will be deleted by this worker and their values
- * aggregated into the total.
- *
- * Copyright (c) 2013-2024, PostgreSQL Global Development Group
- *
- * IDENTIFICATION
- *		src/test/modules/worker_spi/worker_spi.c
- *
- * -------------------------------------------------------------------------
- */
 #include "postgres.h"
+#include <string.h>
+#include "parquet.h"
+
+/* Header for arrow parquet */
+#include <parquet-glib/parquet-glib.h>
+#include <arrow-glib/arrow-glib.h>
+#include <gio/gio.h>
 
 /* These are always necessary for a bgworker */
 #include "miscadmin.h"
@@ -50,18 +35,190 @@ PG_FUNCTION_INFO_V1(ingestor_launch);
 
 PGDLLEXPORT void ingestor_main(void) pg_attribute_noreturn();
 
-static FILE* fd;
-static FILE* worker_fd;
+#define MAX_COLUMN_NAME_CHARS 100
+#define MAX_SUPPORTED_COLUMNS 100
 
-static void setup_logging() {
-  fd = fopen("/tmp/pg_analytica.log", "w");
-  setvbuf(fd, NULL, _IONBF, 0); 
+/* Stores information about column names and column types. */
+typedef struct _ColumnInfo {
+	char column_name[MAX_COLUMN_NAME_CHARS];
+	char column_type[MAX_COLUMN_NAME_CHARS];
+} ColumnInfo;
+
+/** 
+ * Returns list of columns and type of each column.
+ * num_of_columns is populated with columns in the table. 
+ * Caller should free the returned pointer.
+ */
+static ColumnInfo* get_column_types(int* num_of_columns) {
+	StringInfoData buf;
+	initStringInfo(&buf);
+	appendStringInfo(&buf, "SELECT column_name, data_type FROM distributors;");
+	int status = SPI_execute(buf.data, true, 0);
+	elog(LOG, "Executed SPI_execute query %s with status %d", buf.data, select);
+	if (status != SPI_OK_SELECT) {
+		ereport(ERROR, (errcode(ERRCODE_CONNECTION_FAILURE),
+					errmsg("Failed to deduce column types")));
+	}
+	bool isnull;
+	ColumnInfo* columns = palloc_array(ColumnInfo, MAX_SUPPORTED_COLUMNS);
+	for (int i = 0; i < SPI_processed; i += 1) {
+		ColumnInfo column_info;
+		Datum column_name_data = SPI_getbinval(SPI_tuptable->vals[i], SPI_tuptable->tupdesc, 1, &isnull);
+		char* column_name_value = TextDatumGetCString(column_name_data);
+
+		Datum column_type_data = SPI_getbinval(SPI_tuptable->vals[i], SPI_tuptable->tupdesc, 1, &isnull);
+		char* column_type_value = TextDatumGetCString(column_type_data);
+
+		Assert(strlen(column_name_value < MAX_COLUMN_NAME_CHARS));
+		Assert(strlen(column_type_value < MAX_COLUMN_NAME_CHARS));
+
+		strcpy(column_info.column_name, column_name_value);
+		strcpy(column_info.column_name, column_type_value);
+
+		columns[i] = column_info;
+	}
+	*num_of_columns = SPI_processed;
+	return columns;
 }
 
+/**
+ * Return the type of the column based on name.
+ */
+static const char* get_column_type_for(const char *name, ColumnInfo* columns, int num_columns) {
+	for (int i = 0; i < num_columns; i += 1) {
+		if (strcmp(columns[i].column_name, name)) {
+			return columns[i].column_type;
+		}
+	}
+	return NULL;
+}
 
-static void setup_worker_logging() {
-  worker_fd = fopen("/tmp/pg_analytica_worker.log", "w");
-  setvbuf(worker_fd, NULL, _IONBF, 0); 
+/*
+* Creates Arrow schema for the table for basic types. 
+* Caller is reponsible for freeing schema memory.
+*/
+static GArrowSchema* create_table_schema(const ColumnInfo *column_info, int num_columns) {
+	GError *error = NULL;
+	GList *fields = NULL;
+	GArrowSchema *temp = NULL;
+
+	// Define data schema
+    temp = garrow_schema_new(fields);
+	for (int i = 0; i < num_columns; i += 1) {
+		const char *column_name = column_info[i].column_name;
+		const char *column_type = get_column_type_for(column_name, column_info, num_columns);
+		// TODO - try to use postgres type OIDs here like INTOID32
+		// TODO - handle unsigned int
+		/* Integer type */
+		if (strcmp(column_type, "integer")) {
+			GArrowDataType *int_type = garrow_int64_data_type_new();
+			GArrowField *int_field = garrow_field_new(column_name, int_type);
+			temp = garrow_schema_add_field(temp, i, int_field, &error);
+		} else 
+		/* Text type */
+		if (strcmp(column_type, "character varying")) {
+			GArrowDataType *string_type = garrow_string_data_type_new();
+    		GArrowField *string_field = garrow_field_new(column_name, string_type);
+			temp = garrow_schema_add_field(temp, i, string_field, &error);
+		} else 
+		/* Float / Decimal type */
+		if (
+			strcmp(column_type, "double precision") ||
+			strcmp(column_type, "numeric")
+		) {
+			GArrowDataType *double_type = garrow_double_data_type_new();
+			GArrowField *double_field = garrow_field_new(column_name, double_type);
+			temp = garrow_schema_add_field(temp, i, double_field, &error);
+		}  else {
+			elog(LOG, "Unknown column type %s encountered", column_type);
+			return NULL;
+		}
+	}
+	return temp;
+}
+
+static int64* create_int64_data_array(Datum* data, int num_values) {
+	int64 *int_data = (int64*)palloc(num_values * sizeof(int64));
+	for (int i = 0; i < num_values; i += 1) {
+		int_data[i] = DatumGetInt64(data[i]);
+	}
+	return int_data;
+}
+
+static char** create_string_data_array(Datum* data, int num_values) {
+	char **string_data = (char**)palloc(num_values * sizeof(char*));
+	for (int i = 0; i < num_values; i += 1) {
+		char* cstring = TextDatumGetCString(data[i]);
+		string_data[i] = (char*)palloc(sizeof(char) * strlen(cstring) + 1);
+
+	}
+	return string_data;
+}
+
+/**
+ * Returns Arrow table pointer with data populated from SPI query.
+ * Expects SPI query to read desired table rows has been executed.
+ * Caller is reponsible for freeing table memory.
+ */
+static GArrowTable* create_arrow_table(
+	GArrowSchema* schema,
+	const ColumnInfo *column_info, 
+	int num_columns
+) {
+	Assert(SPI_processed > 0);
+	GArrowArray **arrow_arrays = (GArrowArray **)palloc(num_columns * sizeof(GArrowArray));
+	Datum **table_data = (Datum**)palloc(num_columns * sizeof(Datum*));
+	// Iterate over all rows for each column and create Datum Arays for each column
+	for (int i = 0; i < num_columns; i += 1) {
+		// Copy datums to temp variable to access all datums for a column
+		table_data[i] = (Datum*)palloc(SPI_processed * sizeof(Datum));
+		for (int j = 0; j < SPI_processed; j += 1) {
+			bool isnull;
+			Datum datum = SPI_getbinval(SPI_tuptable->vals[j], SPI_tuptable->tupdesc, i + 1, &isnull);
+			if (!isnull) {
+				table_data[i][j] = datum;
+			} else {
+				table_data[i][j] = NULL;
+			}
+		}
+	}
+	// TODO - handle error
+	GError *error;
+	// Populate arrow arrays for each column
+	for (int i = 0; i < num_columns; i += 1) {
+		const ColumnInfo info = column_info[i];
+		const char *column_type = info.column_type;
+		if (strcmp(column_type, "integer")) {
+			const int64* int_data = create_int64_data_array(table_data[i], SPI_processed);
+			arrow_arrays[i] = create_int64_array(int_data, SPI_processed, error);
+			pfree(int_data);
+		} else 
+		/* Text type */
+		if (strcmp(column_type, "character varying")) {
+			const char** string_data = create_string_data_array(table_data[i], SPI_processed);
+			arrow_arrays[i] = create_string_array(string_data, SPI_processed, error);
+			pfree(string_data);
+		} else 
+		/* Float / Decimal type */
+		if (
+			strcmp(column_type, "double precision") ||
+			strcmp(column_type, "numeric")
+		) {
+			// TODO
+		}  else {
+			// TODO
+		}
+	}
+	GArrowTable *table = garrow_table_new_arrays(schema, arrow_arrays, num_columns, &error);
+
+	for (int i = 0; i < num_columns; i += 1) {
+		pfree(arrow_arrays[i]);
+		pfree(table_data[i]);
+	}
+	pfree(arrow_arrays);
+	pfree(table_data);
+
+	return table;
 }
 
 /**
@@ -170,7 +327,6 @@ ingestor_launch(PG_FUNCTION_ARGS)
 	// Extract table name
 	char*		table_name = text_to_cstring(PG_GETARG_TEXT_PP(0));
 	Assert(strlen(table_name) > 0);
-	fprintf(fd, "Input Table: %s\n", table_name);
 	// Extract columns
 	ArrayType  *arr = PG_GETARG_ARRAYTYPE_P(1);
 	Assert(ARR_NDIM(arr) == 1);
@@ -179,10 +335,6 @@ ingestor_launch(PG_FUNCTION_ARGS)
 	int num_of_columns;
 	deconstruct_array(arr, TEXTOID, -1, false, TYPALIGN_INT, &column_datums, NULL, &num_of_columns);
 	Assert(num_of_columns > 0);
-	fprintf(fd, "Input number of columns: %d\n", num_of_columns);
-	for (int i = 0; i < num_of_columns; i += 1) {
-		fprintf(fd, "Input Ordering Column: %s\n", TextDatumGetCString(column_datums[i]));
-	}
 
 	pid_t		pid;
 	BackgroundWorker worker;
@@ -201,12 +353,8 @@ ingestor_launch(PG_FUNCTION_ARGS)
 	/* set bgw_notify_pid so that we can use WaitForBackgroundWorkerStartup */
 	worker.bgw_notify_pid = MyProcPid;
 
-	fprintf(fd, "Registering background worker\n");
-
 	if (!RegisterDynamicBackgroundWorker(&worker, &handle))
 		PG_RETURN_NULL();
-
-	fprintf(fd, "Waiting for background workert to start up\n");
 
 	status = WaitForBackgroundWorkerStartup(handle, &pid);
 	if (status == BGWH_STOPPED)
@@ -222,8 +370,9 @@ ingestor_launch(PG_FUNCTION_ARGS)
 
 	Assert(status == BGWH_STARTED);
 
-	fprintf(fd, "Background worker started\n");
+	elog(LOG, "Background worker started");
 	int bg_status = WaitForBackgroundWorkerShutdown(handle);
-	fprintf(fd, "Background worker closed with status %d\n", bg_status);
+	elog(LOG, "Background worker closed with status %d\n", bg_status);
+
 	PG_RETURN_INT32(pid);
 }
