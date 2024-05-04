@@ -59,3 +59,11 @@ Tests can be executed using the command below.
 psql postgres -f test.sql
 ```
 
+## Viewing Logs
+
+Logs can be viewed at.
+
+```
+tail -100 /opt/homebrew/var/log/postgresql@14.log
+```
+

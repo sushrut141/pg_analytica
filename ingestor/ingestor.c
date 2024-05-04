@@ -1,6 +1,6 @@
 #include "postgres.h"
 #include <string.h>
-#include "parquet.h"
+// #include "parquet.h"
 
 /* Header for arrow parquet */
 #include <parquet-glib/parquet-glib.h>
@@ -38,6 +38,64 @@ PGDLLEXPORT void ingestor_main(void) pg_attribute_noreturn();
 #define MAX_COLUMN_NAME_CHARS 100
 #define MAX_SUPPORTED_COLUMNS 100
 
+/** Arrow functionality */
+#define ASSIGN_IF_NOT_NULL(check_ptr, dest_ptr)                                \
+  {                                                                            \
+    if (check_ptr != NULL) {                                                   \
+      *dest_ptr = *check_ptr;                                                  \
+    }                                                                          \
+  }
+
+#define LOG_ARROW_ERROR(error)                                                 \
+  {                                                                            \
+    if (error != NULL) {                                                       \
+      elog(LOG, error->message);                                               \
+    }                                                                          \
+  }
+
+GArrowArray* create_int64_array(const int *data, int num_values, GError *error) {
+    GError *inner_error = NULL;
+    GArrowInt32ArrayBuilder *int_array_builder;
+    gboolean success = TRUE;
+    int_array_builder = garrow_int64_array_builder_new();
+    
+    for (int i = 0; i < num_values; i++) {
+        int value = data[i];
+        if (value == 0) {
+          value = 0;
+        }
+        garrow_int32_array_builder_append_value(int_array_builder, value, &inner_error);
+        ASSIGN_IF_NOT_NULL(inner_error, error);
+    }
+    GArrowArray *int_array = garrow_array_builder_finish(GARROW_ARRAY_BUILDER(int_array_builder), &inner_error);
+
+    ASSIGN_IF_NOT_NULL(inner_error, error);
+    g_object_unref(int_array_builder);
+
+    return int_array;
+}
+
+GArrowArray* create_string_array(const char **data, int num_values, GError *error) {
+    GError *inner_error;
+    GArrowStringArrayBuilder *string_array_builder;
+    string_array_builder = garrow_string_array_builder_new();
+
+    for (int i = 0; i < num_values; i++) {
+        char* value = data[i];
+        if (value == 0) {
+          value = "";
+        }
+        garrow_string_array_builder_append_value(string_array_builder, value, &inner_error);
+        ASSIGN_IF_NOT_NULL(inner_error, error);
+    }
+
+    GArrowArray *string_array = garrow_array_builder_finish(GARROW_ARRAY_BUILDER(string_array_builder), &inner_error);
+    ASSIGN_IF_NOT_NULL(inner_error, error);
+    g_object_unref(string_array_builder);
+
+    return string_array;
+}
+
 /* Stores information about column names and column types. */
 typedef struct _ColumnInfo {
 	char column_name[MAX_COLUMN_NAME_CHARS];
@@ -52,6 +110,7 @@ typedef struct _ColumnInfo {
 static ColumnInfo* get_column_types(int* num_of_columns) {
 	StringInfoData buf;
 	initStringInfo(&buf);
+	// TODO - ensure column schema is deterministic even after new columns are added
 	appendStringInfo(&buf, "SELECT attname, atttypid FROM pg_attribute WHERE attrelid = 'distributors'::regclass AND attnum > 0;");
 	int status = SPI_execute(buf.data, true, 0);
 	elog(LOG, "Executed SPI_execute query %s with status %d", buf.data, status);
@@ -108,10 +167,11 @@ static GArrowSchema* create_table_schema(const ColumnInfo *column_info, int num_
 	GArrowSchema *temp = NULL;
 
 	// Define data schema
+	elog(LOG, "Creating arrow schema");
     temp = garrow_schema_new(fields);
 	for (int i = 0; i < num_columns; i += 1) {
 		const char *column_name = column_info[i].column_name;
-		Oid column_type = get_column_type_for(column_name, column_info, num_columns);
+		Oid column_type = column_info[i].column_type;
 		switch (column_type) {
 			case INT2OID:
 			case INT4OID:
@@ -120,6 +180,10 @@ static GArrowSchema* create_table_schema(const ColumnInfo *column_info, int num_
 				GArrowDataType *int_type = garrow_int64_data_type_new();
 				GArrowField *int_field = garrow_field_new(column_name, int_type);
 				temp = garrow_schema_add_field(temp, i, int_field, &error);
+				g_object_unref(int_field);
+				g_object_unref(int_type);
+				elog(LOG, "Added field for int type to arrow schema for column %s", column_name);
+				elog(LOG, "Created schema with string %s", garrow_schema_to_string(temp));
 				break;
 			}
 			case VARCHAROID:
@@ -127,6 +191,10 @@ static GArrowSchema* create_table_schema(const ColumnInfo *column_info, int num_
 				GArrowDataType *string_type = garrow_string_data_type_new();
     			GArrowField *string_field = garrow_field_new(column_name, string_type);
 				temp = garrow_schema_add_field(temp, i, string_field, &error);
+				g_object_unref(string_field);
+				g_object_unref(string_type);
+				elog(LOG, "Added field for string type to arrow schema for column %s", column_name);
+				elog(LOG, "Created schema with string %s", garrow_schema_to_string(temp));
 				break;
 			}
 			default:
@@ -134,6 +202,8 @@ static GArrowSchema* create_table_schema(const ColumnInfo *column_info, int num_
 				break;
 		}
 	}
+	const char *schema_str = garrow_schema_to_string(temp);
+	elog(LOG, "Created schema with string %s", schema_str);
 	return temp;
 }
 
@@ -141,6 +211,7 @@ static int64* create_int64_data_array(Datum* data, int num_values) {
 	int64 *int_data = (int64*)palloc(num_values * sizeof(int64));
 	for (int i = 0; i < num_values; i += 1) {
 		int_data[i] = DatumGetInt64(data[i]);
+		elog(LOG, "Added value %d to array", int_data[i]);
 	}
 	return int_data;
 }
@@ -150,7 +221,8 @@ static char** create_string_data_array(Datum* data, int num_values) {
 	for (int i = 0; i < num_values; i += 1) {
 		char* cstring = TextDatumGetCString(data[i]);
 		string_data[i] = (char*)palloc(sizeof(char) * strlen(cstring) + 1);
-
+		strcpy(string_data[i], cstring);
+		elog(LOG, "Added value %s to array", string_data[i]);
 	}
 	return string_data;
 }
@@ -166,6 +238,7 @@ static GArrowTable* create_arrow_table(
 	int num_columns
 ) {
 	Assert(SPI_processed > 0);
+	elog(LOG, "Creating arrow table");
 	GArrowArray **arrow_arrays = (GArrowArray **)palloc(num_columns * sizeof(GArrowArray));
 	Datum **table_data = (Datum**)palloc(num_columns * sizeof(Datum*));
 	// Iterate over all rows for each column and create Datum Arays for each column
@@ -182,8 +255,9 @@ static GArrowTable* create_arrow_table(
 			}
 		}
 	}
+	elog(LOG, "Populated datums in temp memory");
 	// TODO - handle error
-	GError *error;
+	GError *error = NULL;
 	// Populate arrow arrays for each column
 	for (int i = 0; i < num_columns; i += 1) {
 		const ColumnInfo info = column_info[i];
@@ -196,6 +270,8 @@ static GArrowTable* create_arrow_table(
 				const int64* int_data = create_int64_data_array(table_data[i], SPI_processed);
 				arrow_arrays[i] = create_int64_array(int_data, SPI_processed, error);
 				pfree(int_data);
+				elog(LOG, "Created int data array");
+				LOG_ARROW_ERROR(error);
 				break;
 			}
 			case VARCHAROID:
@@ -203,6 +279,8 @@ static GArrowTable* create_arrow_table(
 				const char** string_data = create_string_data_array(table_data[i], SPI_processed);
 				arrow_arrays[i] = create_string_array(string_data, SPI_processed, error);
 				pfree(string_data);
+				elog(LOG, "Created string data array");
+				LOG_ARROW_ERROR(error);
 				break;
 			}
 			default:
@@ -211,14 +289,15 @@ static GArrowTable* create_arrow_table(
 		}
 	}
 	GArrowTable *table = garrow_table_new_arrays(schema, arrow_arrays, num_columns, &error);
-
+	LOG_ARROW_ERROR(error);
 	for (int i = 0; i < num_columns; i += 1) {
-		pfree(arrow_arrays[i]);
+		g_object_unref(arrow_arrays[i]);
 		pfree(table_data[i]);
 	}
 	pfree(arrow_arrays);
 	pfree(table_data);
-
+	const char *table_definition = garrow_table_to_string(table, &error);
+	elog(LOG, "Created arrow table with definition %s", table_definition);
 	return table;
 }
 
@@ -253,10 +332,13 @@ ingestor_main()
 	ColumnInfo *column_info = get_column_types(&total_columns);
 	elog(LOG, "Extracted %d column types", total_columns);
 
+	GArrowSchema *arrow_schema = create_table_schema(column_info, total_columns);
+	elog(LOG, "Created arow schema");
 	do {
 
 		StringInfoData buf;
 		initStringInfo(&buf);
+		// TODO - order of columns in result should match schema columns
 		appendStringInfo(&buf, "SELECT * FROM distributors LIMIT %d OFFSET %d;", 5, offset);
 
 		// Execute the chunked query using SPI_exec
@@ -272,49 +354,9 @@ ingestor_main()
 		processed_count = SPI_processed;
 		elog(LOG, "Processed %d rows", processed_count);
 		elog(LOG, "Number of rows is %lu", SPI_tuptable->numvals);
-
-		int num_of_columns = SPI_tuptable->numvals;
-		for (int i = 0 ; i < processed_count; i += 1) {
-			elog(LOG, "Printing values for row %d", i + 1);
-			for (int j = 0; j < 2; j += 1) {
-				switch (SPI_tuptable->tupdesc->attrs[j].atttypid) {
-					case INT2OID:
-					case INT4OID:
-					case INT8OID:
-					{
-						elog(LOG, "Reading int column");
-						bool isnull;
-						Datum column_data = SPI_getbinval(SPI_tuptable->vals[i],
-									   SPI_tuptable->tupdesc,
-									   j + 1, &isnull);
-						if (!isnull) {
-							int column_value = DatumGetUInt32(column_data);
-							elog(LOG, "%d |", column_value);
-						} else {
-							elog(LOG, "null |");
-						}
-						break;
-					}
-					case VARCHAROID:
-					{
-						elog(LOG, "Reading varchar column");
-						bool isnull;
-						Datum column_data = SPI_getbinval(SPI_tuptable->vals[i],
-									   SPI_tuptable->tupdesc,
-									   j + 1, &isnull);
-						if (!isnull) {
-							char* column_value = TextDatumGetCString(column_data);
-							elog(LOG, "%s |", column_value);
-						} else {
-							elog(LOG, "null |");
-						}
-						break;
-					}
-					default:
-						elog(LOG, "found some other type with name");
-						break;
-				}
-			}
+		if (processed_count > 0) {
+			GArrowTable *arrow_table = create_arrow_table(arrow_schema, column_info, total_columns);
+			g_object_unref(arrow_table);
 		}
 		// Increment offset by number of processed rows
 		offset += processed_count;
@@ -322,6 +364,8 @@ ingestor_main()
 	PopActiveSnapshot();
 	CommitTransactionCommand();
 	SPI_finish();
+
+	pfree(column_info);
 	elog(LOG, "SPI_finish called");
 	exit(0);
 }
