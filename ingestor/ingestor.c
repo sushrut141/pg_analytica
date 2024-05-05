@@ -1,7 +1,6 @@
 #include "postgres.h"
 #include <string.h>
 #include <dirent.h>
-// #include "parquet.h"
 
 /* Header for arrow parquet */
 #include <parquet-glib/parquet-glib.h>

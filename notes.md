@@ -54,3 +54,19 @@ Maybe we can keep track of the oldest txn id ingested and query rows with txn id
         - Example usage of background worker
           `postgres/src/test/modules/worker_spi/worker_spi.c`
 
+## Reading columnar file created by ingestor
+
+The columnar file is created in the postgres data directory (PGDATA).
+PGDATA directory can be found using this sql query.
+```
+SELECT current_setting('data_directory') AS pgdata_path;
+```
+
+To read the parquet file, start a duck db instance in memory and
+execute the select query to read the parquet file.
+
+```
+$ duckdb
+
+SELECT * from read_parquet('/opt/homebrew/var/postgresql@14/sample.parquet');
+```
