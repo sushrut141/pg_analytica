@@ -1,5 +1,6 @@
 #include "postgres.h"
 #include <string.h>
+#include <dirent.h>
 // #include "parquet.h"
 
 /* Header for arrow parquet */
@@ -53,22 +54,44 @@ PGDLLEXPORT void ingestor_main(void) pg_attribute_noreturn();
     }                                                                          \
   }
 
-GArrowArray* create_int64_array(const int *data, int num_values, GError *error) {
+static void list_current_directories() {
+	DIR *dir;
+	struct dirent *entry;
+
+	// Open the current directory (".")
+	dir = opendir(".");
+	if (dir == NULL) {
+		perror("opendir");
+		return;
+	}
+
+	// Read entries from the directory
+	while ((entry = readdir(dir)) != NULL) {
+		// Check for "." and ".." entries
+		if (strcmp(entry->d_name, ".") == 0 || 
+			strcmp(entry->d_name, "..") == 0) {
+			continue;
+		}
+		elog(LOG, "Found directory with path %s", entry->d_name);
+	}
+	closedir(dir);
+}
+
+GArrowArray* create_int64_array(const int64 *data, int num_values, GError *error) {
     GError *inner_error = NULL;
     GArrowInt32ArrayBuilder *int_array_builder;
     gboolean success = TRUE;
     int_array_builder = garrow_int64_array_builder_new();
     
     for (int i = 0; i < num_values; i++) {
-        int value = data[i];
-        if (value == 0) {
-          value = 0;
-        }
-        garrow_int32_array_builder_append_value(int_array_builder, value, &inner_error);
+        int64 value = data[i];
+        elog(LOG, "Adding value %d to arrow array", value);
+        garrow_int64_array_builder_append_value(int_array_builder, value, &inner_error);
+		LOG_ARROW_ERROR(inner_error);
         ASSIGN_IF_NOT_NULL(inner_error, error);
     }
     GArrowArray *int_array = garrow_array_builder_finish(GARROW_ARRAY_BUILDER(int_array_builder), &inner_error);
-
+	LOG_ARROW_ERROR(inner_error);
     ASSIGN_IF_NOT_NULL(inner_error, error);
     g_object_unref(int_array_builder);
 
@@ -76,7 +99,7 @@ GArrowArray* create_int64_array(const int *data, int num_values, GError *error) 
 }
 
 GArrowArray* create_string_array(const char **data, int num_values, GError *error) {
-    GError *inner_error;
+    GError *inner_error = NULL;
     GArrowStringArrayBuilder *string_array_builder;
     string_array_builder = garrow_string_array_builder_new();
 
@@ -85,14 +108,15 @@ GArrowArray* create_string_array(const char **data, int num_values, GError *erro
         if (value == 0) {
           value = "";
         }
+		elog(LOG, "Adding value %s to arrow array", value);
         garrow_string_array_builder_append_value(string_array_builder, value, &inner_error);
         ASSIGN_IF_NOT_NULL(inner_error, error);
     }
 
     GArrowArray *string_array = garrow_array_builder_finish(GARROW_ARRAY_BUILDER(string_array_builder), &inner_error);
+	LOG_ARROW_ERROR(inner_error);
     ASSIGN_IF_NOT_NULL(inner_error, error);
     g_object_unref(string_array_builder);
-
     return string_array;
 }
 
@@ -143,18 +167,6 @@ static ColumnInfo* get_column_types(int* num_of_columns) {
 	*num_of_columns = SPI_processed;
 	elog(LOG, "Finished extracting column types");
 	return columns;
-}
-
-/**
- * Return the type of the column based on name.
- */
-static Oid get_column_type_for(const char *name, ColumnInfo* columns, int num_columns) {
-	for (int i = 0; i < num_columns; i += 1) {
-		if (strcmp(columns[i].column_name, name)) {
-			return columns[i].column_type;
-		}
-	}
-	return 0;
 }
 
 /*
@@ -290,15 +302,42 @@ static GArrowTable* create_arrow_table(
 	}
 	GArrowTable *table = garrow_table_new_arrays(schema, arrow_arrays, num_columns, &error);
 	LOG_ARROW_ERROR(error);
+
 	for (int i = 0; i < num_columns; i += 1) {
 		g_object_unref(arrow_arrays[i]);
 		pfree(table_data[i]);
 	}
 	pfree(arrow_arrays);
 	pfree(table_data);
+
 	const char *table_definition = garrow_table_to_string(table, &error);
 	elog(LOG, "Created arrow table with definition %s", table_definition);
 	return table;
+}
+
+
+static void write_arrow_table(
+	GArrowSchema *schema,
+	GArrowTable* table) {
+
+	GError *error = NULL;
+	GParquetWriterProperties *writer_properties = gparquet_writer_properties_new();
+	elog(LOG, "Create arrow writer properties");
+    GParquetArrowFileWriter *writer = gparquet_arrow_file_writer_new_path(schema, "./sample.parquet", writer_properties, &error);
+	LOG_ARROW_ERROR(error);
+	elog(LOG, "Created arrow file writer.");
+
+	gboolean is_write_successfull = 
+        gparquet_arrow_file_writer_write_table(writer, table, 10000, &error);
+	LOG_ARROW_ERROR(error);
+	elog(LOG, "Wrote arrow table  to disk");
+
+    gboolean file_closed = gparquet_arrow_file_writer_close(writer, &error);
+	LOG_ARROW_ERROR(error);
+
+	Assert(file_closed);
+
+	elog(LOG, "Sucessfully wrote columnar file to disk.");
 }
 
 /**
@@ -312,6 +351,8 @@ ingestor_main()
 	int offset = 0;
 	int processed_count;
 	int select;
+
+	list_current_directories();
 
 	bits32		flags = 0;
 	BackgroundWorkerUnblockSignals();
@@ -339,7 +380,7 @@ ingestor_main()
 		StringInfoData buf;
 		initStringInfo(&buf);
 		// TODO - order of columns in result should match schema columns
-		appendStringInfo(&buf, "SELECT * FROM distributors LIMIT %d OFFSET %d;", 5, offset);
+		appendStringInfo(&buf, "SELECT * FROM distributors LIMIT %d OFFSET %d;", 20, offset);
 
 		// Execute the chunked query using SPI_exec
 		elog(LOG, "Executing SPI_execute query %s", buf.data);
@@ -356,14 +397,19 @@ ingestor_main()
 		elog(LOG, "Number of rows is %lu", SPI_tuptable->numvals);
 		if (processed_count > 0) {
 			GArrowTable *arrow_table = create_arrow_table(arrow_schema, column_info, total_columns);
+			// write to disk
+			write_arrow_table(arrow_schema, arrow_table);
+
 			g_object_unref(arrow_table);
 		}
 		// Increment offset by number of processed rows
 		offset += processed_count;
 	} while (processed_count > 0);
+	
+	g_object_unref(arrow_schema);
+	SPI_finish();
 	PopActiveSnapshot();
 	CommitTransactionCommand();
-	SPI_finish();
 
 	pfree(column_info);
 	elog(LOG, "SPI_finish called");

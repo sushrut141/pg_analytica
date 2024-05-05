@@ -47,6 +47,8 @@ Maybe we can keep track of the oldest txn id ingested and query rows with txn id
         - Another background worker periodically combines multiple columnar files for the same table into a single file
         - Multiple ways of initializing a file defined here
           `postgres/src/include/storage/fd.h`
+        - Initializing a subdirectory in postgres data directory here
+          `MakePGDirectory(const char *directoryName)`
         - Details about creating background worker here
           `postgres/src/include/postmaster/bgworker.h`
         - Example usage of background worker
