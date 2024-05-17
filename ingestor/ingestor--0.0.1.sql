@@ -7,3 +7,9 @@ CREATE FUNCTION ingestor_launch(tablename text, columns text[])
 RETURNS pg_catalog.int4 STRICT
 AS 'MODULE_PATHNAME'
 LANGUAGE C;
+
+
+CREATE FUNCTION register_export()
+RETURNS bigint
+AS 'MODULE_PATHNAME'
+LANGUAGE C;

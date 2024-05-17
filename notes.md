@@ -70,3 +70,17 @@ $ duckdb
 
 SELECT * from read_parquet('/opt/homebrew/var/postgresql@14/sample.parquet');
 ```
+
+
+## Tasks
+
+ - Load large dataset (10GiB) into postgres table
+ - Create a way to schedule export for a table at regular intervals
+ - Create a way to drop columnar table
+ - Create table to maintain state about export progress (number of rows processed)
+ - Add logic to atomically replace columnar data directory for a table after export is complete
+ - Add logic to loop over all registered tables and export data
+
+ - Update ingestor to export multiple parquet files from table
+ - Test query performance with large dataset
+ - 

@@ -1,5 +1,6 @@
 # Refer src/makefiles/pgxs.mk in postgres source for details about flags
-MODULES = ingestor
+MODULE_big = ingestor
+OBJS = ingestor.o registry.o 
 EXTENSION = ingestor     # the extersion's name
 DATA = ingestor--0.0.1.sql    # script file to install
 #REGRESS = get_sum_test      # the test script file
