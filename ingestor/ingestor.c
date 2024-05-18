@@ -1,5 +1,8 @@
 #include "postgres.h"
 #include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#include <time.h>
 #include <dirent.h>
 
 /* Header for arrow parquet */
@@ -28,6 +31,7 @@
 #include "utils/acl.h"
 #include "utils/builtins.h"
 #include "utils/snapmgr.h"
+#include "export_entry.h"
 
 PG_MODULE_MAGIC;
 
@@ -339,6 +343,116 @@ static void write_arrow_table(
 	elog(LOG, "Sucessfully wrote columnar file to disk.");
 }
 
+static void get_tables_to_process_in_order(ExportEntry **entries, int *num_of_tables) {
+	StringInfoData buf;
+    initStringInfo(&buf);
+    appendStringInfo(&buf, "SELECT table_name, columns_to_export, last_run_completed, export_frequency_hours FROM analytica_exports ORDER BY last_run_completed;");
+
+	int connection = SPI_connect();
+    if (connection < 0) {
+		ereport(ERROR, (errcode(ERRCODE_CONNECTION_FAILURE),
+					errmsg("Failed to connect to database")));
+	}
+	elog(LOG, "Created connection for query");
+    // Execute the chunked query using SPI_exec
+    elog(LOG, "Executing SPI_execute query %s", buf.data);
+    int status = SPI_execute(buf.data, false, 0);
+    elog(LOG, "Executed SPI_execute command with status %d", status);	
+	if (status < 0) {
+		ereport(ERROR, (errcode(ERRCODE_CONNECTION_FAILURE),
+					errmsg("Failed to fetch tables to export.")));
+	}
+	SPI_finish();
+
+	if (!SPI_processed) {
+		*num_of_tables = 0;
+		return;
+	}
+
+	int valid_entries = 0;
+	*entries = (ExportEntry*)palloc(sizeof(ExportEntry) * SPI_processed);
+
+	// Calaculate number of vvalid entries to export.
+	for (int i = 0; i < SPI_processed; i += 1) {
+		bool isnull;
+		bool is_valid_entry = false;
+		Datum last_completed_datum = SPI_getbinval(SPI_tuptable->vals[i], SPI_tuptable->tupdesc, 2, &isnull);
+		if (isnull) {
+			// Table is newly scheduled for export so last run completed is null
+			is_valid_entry = true;
+		} else {
+			Datum export_frequency_datum = SPI_getbinval(SPI_tuptable->vals[i], SPI_tuptable->tupdesc, 3, &isnull);
+			int export_frequency = DatumGetInt16(export_frequency_datum);
+			int last_completed_timestamp = DatumGetTimestamp(last_completed_datum);
+			time_t current_time = time(NULL);
+			int hours_elapsed = (current_time - last_completed_timestamp) / 3600;
+			if (hours_elapsed > export_frequency) {
+				is_valid_entry = true;
+			}
+		}
+		if (is_valid_entry) {
+			valid_entries += 1;
+
+			Datum name_datum = SPI_getbinval(SPI_tuptable->vals[i], SPI_tuptable->tupdesc, 0, &isnull);
+			char *table_name = TextDatumGetCString(name_datum);
+
+			ArrayType* arr = DatumGetArrayTypeP(SPI_getbinval(SPI_tuptable->vals[i], SPI_tuptable->tupdesc, 1, &isnull));
+			Datum *column_datums;
+			int num_of_columns;
+			deconstruct_array(arr, TEXTOID, -1, false, TYPALIGN_INT, &column_datums, NULL, &num_of_columns);
+
+			ExportEntry *entry;
+			initialize_export_entry(table_name, num_of_columns, &entry);
+
+			for (int j = 0; j < num_of_columns; j += 1) {
+				char *column_name = TextDatumGetCString(column_datums[i]);
+				export_entry_add_column(entry, column_name, i);
+			}
+			(*entries)[i] = *entry;
+		}
+	}
+	*num_of_tables = valid_entries;
+}
+
+static void setup_data_directories(const char *table_name) {
+	char *base_path = strcat("./pg_analytica/", table_name);
+	char *temp_path = strcat(base_path, "/temp");
+
+	// Create base data directory if not exists.
+	if (!access(base_path, F_OK) == 0) {
+		if (errno == ENOENT) {
+			if (mkdir(base_path, 0755) == -1) {
+				elog(ERROR, "Failed to create data directoy %s", base_path);
+			}
+		}
+	}
+	// Create temp directory if not exists.
+	if (!access(temp_path, F_OK) == 0) {
+		if (errno == ENOENT) {
+			if (mkdir(temp_path, 0755) == -1) {
+				elog(ERROR, "Failed to create data directoy %s", temp_path);
+			}
+		}
+	}
+	// Delete content in temp directory.
+	DIR *dir = opendir(temp_path);
+	struct dirent *entry;
+	while ((entry = readdir(dir)) != NULL) {
+		char filepath[PATH_MAX];
+		snprintf(filepath, sizeof(filepath), "%s/%s", temp_path, entry->d_name);
+
+		// Skip special entries (".", "..")
+		if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
+			continue;
+		}
+		if (unlink(filepath) == -1) {
+			elog(ERROR, "Failed to delete temp file %s", filepath);
+		}
+		
+	}
+	closedir(dir);
+}
+
 /**
  * Use SPI to read rows from table.
  * https://www.postgresql.org/docs/current/spi.html
@@ -351,11 +465,23 @@ ingestor_main()
 	int processed_count;
 	int select;
 
-	list_current_directories();
-
 	bits32		flags = 0;
 	BackgroundWorkerUnblockSignals();
 	BackgroundWorkerInitializeConnection("postgres", "sushrutshivaswamy", flags);
+
+	int num_of_tables;
+	ExportEntry *entries;
+	elog(LOG, "Fetching tables to export");
+	get_tables_to_process_in_order(&entries, &num_of_tables);
+	elog(LOG, "Beginning export for %d tables", num_of_tables);
+
+	for (int i = 0; i < num_of_tables; i += 1) {
+		char *table_name = entries[i].table_name;
+		setup_data_directories(table_name);
+
+		elog(LOG, "Starting export for %s", table_name);
+	}
+
 
 	SetCurrentStatementStartTimestamp();
 	StartTransactionCommand();

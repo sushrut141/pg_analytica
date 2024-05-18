@@ -17,19 +17,13 @@ static int execute_query(StringInfoData buf)
 		ereport(ERROR, (errcode(ERRCODE_CONNECTION_FAILURE),
 					errmsg("Failed to connect to database")));
 	}
-    // SetCurrentStatementStartTimestamp();
-	// StartTransactionCommand();
 	elog(LOG, "Created connection for query");
-	// PushActiveSnapshot(GetTransactionSnapshot());
-
     // Execute the chunked query using SPI_exec
     elog(LOG, "Executing SPI_execute query %s", buf.data);
     int status = SPI_execute(buf.data, false, 0);
     elog(LOG, "Executed SPI_execute command with status %d", status);
 	
 	SPI_finish();
-	// PopActiveSnapshot();
-	// CommitTransactionCommand();
     return status;
 }
 
