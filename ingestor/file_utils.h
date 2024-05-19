@@ -14,6 +14,8 @@ void populate_root_path(char *out, bool relative) {
         if (getcwd(out, PATH_MAX) == NULL) {
             perror("getcwd");
         }
+    } else {
+        strcat(out, ".");
     }
     strcat(out, "/pg_analytica/");
 }

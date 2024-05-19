@@ -33,6 +33,7 @@
 #include "utils/snapmgr.h"
 #include "export_entry.h"
 #include "file_utils.h"
+#include "constants.h"
 
 PG_MODULE_MAGIC;
 
@@ -328,8 +329,11 @@ static void write_arrow_table(
 	int chunk_num,
 	GArrowSchema *schema,
 	GArrowTable* table) {
-	char path[200];
-	sprintf(path, "./pg_analytica/%s/temp/%d.parquet", table_name, chunk_num);
+	char path[PATH_MAX];
+	char file_name[PATH_MAX];
+	populate_temp_path_for_table(table_name, path, /*relative=*/true);
+	sprintf(file_name, "/%d.parquet", chunk_num);
+	strcat(path, file_name);
 	elog(LOG, "Attempting to write file %s", path);
 
 	GError *error = NULL;
@@ -404,13 +408,21 @@ static void get_tables_to_process_in_order(ExportEntry *entries, int *num_of_tab
 			is_valid_entry = true;
 			elog(LOG, "last completed datum is null");
 		} else {
+			elog(LOG, "Evaluating if older export entry is past threshold");
 			Datum export_frequency_datum = SPI_getbinval(SPI_tuptable->vals[i], SPI_tuptable->tupdesc, 4, &isnull);
 			int export_frequency = DatumGetInt16(export_frequency_datum);
-			int last_completed_timestamp = DatumGetTimestamp(last_completed_datum);
+			// TODO - fix reading timestamp from datum
+			int64_t last_completed_timestamp = DatumGetTimestamp(last_completed_datum) / 1000000;
 			time_t current_time = time(NULL);
+			elog(LOG, "last completed %d", last_completed_timestamp);
+			elog(LOG, "current %d", current_time);
 			int hours_elapsed = (current_time - last_completed_timestamp) / 3600;
+			elog(LOG, "%d hours elapsed since last export");
 			if (hours_elapsed > export_frequency) {
 				is_valid_entry = true;
+				elog(LOG, "Marking older entry for export again");
+			} else {
+				elog(LOG, "Older export entry threshold han;t passed");
 			}
 		}
 		if (is_valid_entry) {
@@ -546,6 +558,26 @@ void move_temp_files(const char *table_name) {
 	closedir(dir);
 }
 
+char* get_columns_string(char **columns, int num_of_columns) {
+  int total_size = 0;
+  elog(LOG, "Creating stringified columns");
+  for (int i = 0; i < num_of_columns; i++) {
+    char *column_name = columns[i];
+    total_size += strlen(column_name) + 1;
+    elog(LOG, "Size of column %s is %d", column_name, strlen(column_name));
+  }
+  char *combined_string = (char*)palloc(total_size * sizeof(char));
+  elog(LOG, "Allocated memory");
+  combined_string[0] = '\0'; 
+  for (int i = 0; i < num_of_columns; i++) {
+    strcat(combined_string, columns[i]);
+    elog(LOG, "Creating combined string %s", combined_string);
+    if (i < num_of_columns - 1) {
+      strcat(combined_string, ",");
+    }
+  }
+  return combined_string;
+}
 
 void export_table_data(ExportEntry entry) {
 	int offset = 0;
@@ -570,15 +602,9 @@ void export_table_data(ExportEntry entry) {
 	GArrowSchema *arrow_schema = create_table_schema(column_info, total_columns);
 	
 	int chunk = 0;
-	char column_str[1000];
-	for (int i = 0; i < entry.num_of_columns - 1; i += 1) {
-		strcat(column_str, entry.columns_to_export[i]);
-		strcat(column_str, ", ");
-	}
-	strcat(column_str, entry.columns_to_export[entry.num_of_columns - 1]);
+	char* column_str = get_columns_string(entry.columns_to_export, entry.num_of_columns);
 
 	do {
-
 		StringInfoData buf;
 		initStringInfo(&buf);
 		// TODO - order of columns in result should match schema columns
@@ -613,11 +639,45 @@ void export_table_data(ExportEntry entry) {
 		offset += processed_count;
 	} while (processed_count > 0);
 
+	pfree(column_str);
 	// Move files from temp directly to data directory.
 	move_temp_files(entry.table_name);
 
 	g_object_unref(arrow_schema);
 	pfree(column_info);
+
+	SPI_finish();
+	PopActiveSnapshot();
+	CommitTransactionCommand();
+}
+
+/**
+ * Update table export status after successfull export.
+ */
+void update_table_export_metadata(const char *table_name) {
+	StringInfoData buf;
+    initStringInfo(&buf);
+    appendStringInfo(
+		&buf, 
+		"UPDATE analytica_exports        \
+		 SET last_run_completed = CURRENT_TIMESTAMP, export_status = %d \
+		 WHERE table_name = '%s';", 
+		ACTIVE,
+		table_name
+	);
+
+	SetCurrentStatementStartTimestamp();
+	StartTransactionCommand();
+	PushActiveSnapshot(GetTransactionSnapshot());
+	int connection = SPI_connect();
+    if (connection < 0) {
+		ereport(ERROR, (errcode(ERRCODE_CONNECTION_FAILURE),
+					errmsg("Failed to connect to database")));
+	}
+	elog(LOG, "Created connection for query");
+    elog(LOG, "Executing SPI_execute query %s", buf.data);
+    int status = SPI_execute(buf.data, /*read_only=*/false, /*count=*/0);
+    elog(LOG, "Executed SPI_execute command with status %d", status);	
 
 	SPI_finish();
 	PopActiveSnapshot();
@@ -649,13 +709,14 @@ ingestor_main()
 
 		elog(LOG, "Starting export for %s", table_name);
 		export_table_data(entries[i]);
+		elog(LOG, "Updating export status");
+		update_table_export_metadata(entries[i].table_name);
 		elog(LOG, "Freeing export entry");
 		free_export_entry(&entries[i]);
 		elog(LOG, "Freed export entry");
 	}
 	exit(0);
 }
-
 
 Datum
 ingestor_launch(PG_FUNCTION_ARGS)
