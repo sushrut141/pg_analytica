@@ -32,6 +32,7 @@
 #include "utils/builtins.h"
 #include "utils/snapmgr.h"
 #include "export_entry.h"
+#include "file_utils.h"
 
 PG_MODULE_MAGIC;
 
@@ -440,23 +441,18 @@ static void get_tables_to_process_in_order(ExportEntry *entries, int *num_of_tab
 }
 
 static void setup_data_directories(const char *table_name) {
-	// TODO -move this logic to common dir util functions
-	char cwd[PATH_MAX];
-	if (getcwd(cwd, sizeof(cwd)) != NULL) {
-    	elog(LOG, "Current working directory: %s\n", cwd);
-  	}
-	char root_path[100];
-	strcat(root_path, cwd);
-	strcat(root_path, "/pg_analytica");
+	
+	char root_path[PATH_MAX];
+	char base_path[PATH_MAX];
+	char temp_path[PATH_MAX];
+
+
+	populate_root_path(root_path, /*relative=*/false);
+	populate_data_path_for_table(table_name, base_path, /*relative=*/false);
+	populate_temp_path_for_table(table_name, temp_path, /*relative=*/false);
+
 	elog(LOG, "Setting up root directory %s", root_path);
-	char base_path[200];
-	strcat(base_path, cwd);
-	strcat(base_path, "/pg_analytica/");
-	strcat(base_path, table_name);
 	elog(LOG, "Setting up base directory %s", base_path);
-	char temp_path[400];
-	strcpy(temp_path, base_path);
-	strcat(temp_path, "/temp");
 	elog(LOG, "Setting up temp directory %s", temp_path);
 
 	// Create root data directory if not exists.
@@ -499,6 +495,57 @@ static void setup_data_directories(const char *table_name) {
 	closedir(dir);
 	elog(LOG, "Data directory setup complete for %s", table_name);
 }
+
+/**
+ * Moves columnar files from temp directory to data directory for table.
+ * Cuurently this moves files one by one so it isn't atomic.
+ */
+void move_temp_files(const char *table_name) {
+	DIR *dir;
+	struct dirent *entry;
+
+	char temp_path[PATH_MAX];
+	char data_path[PATH_MAX];
+
+	populate_data_path_for_table(table_name, data_path, false);
+	populate_temp_path_for_table(table_name, temp_path, false);
+
+	dir = opendir(temp_path);
+	if (dir == NULL) {
+		perror("opendir");
+		return;
+	}
+	while ((entry = readdir(dir)) != NULL) {
+		if (strcmp(entry->d_name, ".") == 0 || 
+			strcmp(entry->d_name, "..") == 0) {
+			continue;
+		}
+		elog(LOG, "Found entry with path %s", entry->d_name);
+		char src_path[PATH_MAX];
+		char dest_path[PATH_MAX];
+
+		// temp columnar file
+		strcpy(src_path, temp_path);
+		strcat(src_path, "/");
+		strcat(src_path, entry->d_name);
+
+		// Final path
+		strcpy(dest_path, data_path);
+		strcat(dest_path, "/");
+		strcat(dest_path, entry->d_name);
+
+		elog(LOG, "Temp path %s", src_path);
+		elog(LOG, "Data path %s", dest_path);
+
+		if (rename(src_path, dest_path) == 0) {
+			elog(LOG, "File '%s' renamed to '%s' successfully.\n", src_path, dest_path);
+		} else {
+			perror("rename"); // Print error message if rename fails
+		}
+	}
+	closedir(dir);
+}
+
 
 void export_table_data(ExportEntry entry) {
 	int offset = 0;
@@ -565,6 +612,9 @@ void export_table_data(ExportEntry entry) {
 		// Increment offset by number of processed rows
 		offset += processed_count;
 	} while (processed_count > 0);
+
+	// Move files from temp directly to data directory.
+	move_temp_files(entry.table_name);
 
 	g_object_unref(arrow_schema);
 	pfree(column_info);
