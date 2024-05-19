@@ -83,4 +83,3 @@ SELECT * from read_parquet('/opt/homebrew/var/postgresql@14/sample.parquet');
 
  - Update ingestor to export multiple parquet files from table
  - Test query performance with large dataset
- - 

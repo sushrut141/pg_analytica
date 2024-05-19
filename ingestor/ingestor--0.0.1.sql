@@ -10,13 +10,6 @@ CREATE TABLE analytica_exports (
     export_status int
 );
 
--- Launch an ingestion worker to create columnar store for the following table
--- sorted by the supplied columns. Both table_name and keys are required arguments.
-CREATE OR REPLACE FUNCTION ingestor_launch(tablename text, columns text[])
-RETURNS pg_catalog.int4 STRICT
-AS 'MODULE_PATHNAME'
-LANGUAGE C;
-
 -- Register a postgres table for export
 CREATE OR REPLACE FUNCTION register_table_export(table_name text, columns_to_export text[], export_frequency_hours int)
 RETURNS bigint
@@ -28,3 +21,10 @@ CREATE OR REPLACE FUNCTION unregister_Table_export(table_name text)
 RETURNS bigint
 AS 'MODULE_PATHNAME'
 LANGUAGE C VOLATILE;
+
+
+-- Launch an ingestion worker to export columnar data for tables registered for export.
+CREATE OR REPLACE FUNCTION ingestor_launch()
+RETURNS pg_catalog.int4 STRICT
+AS 'MODULE_PATHNAME'
+LANGUAGE C;

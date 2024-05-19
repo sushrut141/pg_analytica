@@ -41,6 +41,7 @@ PGDLLEXPORT void ingestor_main(void) pg_attribute_noreturn();
 
 #define MAX_COLUMN_NAME_CHARS 100
 #define MAX_SUPPORTED_COLUMNS 100
+#define MAX_EXPORT_ENTRIES 10
 
 /** Arrow functionality */
 #define ASSIGN_IF_NOT_NULL(check_ptr, dest_ptr)                                \
@@ -93,7 +94,8 @@ GArrowArray* create_int64_array(const int64 *data, int num_values, GError *error
 		LOG_ARROW_ERROR(inner_error);
         ASSIGN_IF_NOT_NULL(inner_error, error);
     }
-    GArrowArray *int_array = garrow_array_builder_finish(GARROW_ARRAY_BUILDER(int_array_builder), &inner_error);
+    GArrowArray *int_array = garrow_array_builder_finish(
+		GARROW_ARRAY_BUILDER(int_array_builder), &inner_error);
 	LOG_ARROW_ERROR(inner_error);
     ASSIGN_IF_NOT_NULL(inner_error, error);
     g_object_unref(int_array_builder);
@@ -116,7 +118,8 @@ GArrowArray* create_string_array(const char **data, int num_values, GError *erro
         ASSIGN_IF_NOT_NULL(inner_error, error);
     }
 
-    GArrowArray *string_array = garrow_array_builder_finish(GARROW_ARRAY_BUILDER(string_array_builder), &inner_error);
+    GArrowArray *string_array = garrow_array_builder_finish(
+		GARROW_ARRAY_BUILDER(string_array_builder), &inner_error);
 	LOG_ARROW_ERROR(inner_error);
     ASSIGN_IF_NOT_NULL(inner_error, error);
     g_object_unref(string_array_builder);
@@ -134,11 +137,11 @@ typedef struct _ColumnInfo {
  * num_of_columns is populated with columns in the table. 
  * Caller should free the returned pointer.
  */
-static ColumnInfo* get_column_types(int* num_of_columns) {
+static ColumnInfo* get_column_types(const char *table_name, int* num_of_columns) {
 	StringInfoData buf;
 	initStringInfo(&buf);
 	// TODO - ensure column schema is deterministic even after new columns are added
-	appendStringInfo(&buf, "SELECT attname, atttypid FROM pg_attribute WHERE attrelid = 'distributors'::regclass AND attnum > 0;");
+	appendStringInfo(&buf, "SELECT attname, atttypid FROM pg_attribute WHERE attrelid = '%s'::regclass AND attnum > 0;", table_name);
 	int status = SPI_execute(buf.data, true, 0);
 	elog(LOG, "Executed SPI_execute query %s with status %d", buf.data, status);
 	if (status != SPI_OK_SELECT) {
@@ -320,68 +323,87 @@ static GArrowTable* create_arrow_table(
 
 
 static void write_arrow_table(
+	const char *table_name,
+	int chunk_num,
 	GArrowSchema *schema,
 	GArrowTable* table) {
+	char path[200];
+	sprintf(path, "./pg_analytica/%s/temp/%d.parquet", table_name, chunk_num);
+	elog(LOG, "Attempting to write file %s", path);
 
 	GError *error = NULL;
 	GParquetWriterProperties *writer_properties = gparquet_writer_properties_new();
 	elog(LOG, "Create arrow writer properties");
-    GParquetArrowFileWriter *writer = gparquet_arrow_file_writer_new_path(schema, "./sample.parquet", writer_properties, &error);
+    GParquetArrowFileWriter *writer = gparquet_arrow_file_writer_new_path(schema, path, writer_properties, &error);
 	LOG_ARROW_ERROR(error);
 	elog(LOG, "Created arrow file writer.");
 
 	gboolean is_write_successfull = 
         gparquet_arrow_file_writer_write_table(writer, table, 10000, &error);
 	LOG_ARROW_ERROR(error);
-	elog(LOG, "Wrote arrow table  to disk");
+	elog(LOG, "Wrote arrow table to disk");
 
     gboolean file_closed = gparquet_arrow_file_writer_close(writer, &error);
 	LOG_ARROW_ERROR(error);
 
 	Assert(file_closed);
 
+	g_object_unref(table);
+	g_object_unref(writer);
+	g_object_unref(writer_properties);
+
 	elog(LOG, "Sucessfully wrote columnar file to disk.");
 }
 
-static void get_tables_to_process_in_order(ExportEntry **entries, int *num_of_tables) {
+static void get_tables_to_process_in_order(ExportEntry *entries, int *num_of_tables) {
 	StringInfoData buf;
     initStringInfo(&buf);
-    appendStringInfo(&buf, "SELECT table_name, columns_to_export, last_run_completed, export_frequency_hours FROM analytica_exports ORDER BY last_run_completed;");
+    appendStringInfo(&buf, 
+	"SELECT                     \
+		table_name,             \
+		columns_to_export,      \
+		last_run_completed,     \
+		export_frequency_hours  \
+	FROM analytica_exports      \
+	ORDER BY last_run_completed \
+	LIMIT %d;" , MAX_EXPORT_ENTRIES);
 
+	SetCurrentStatementStartTimestamp();
+	StartTransactionCommand();
+	PushActiveSnapshot(GetTransactionSnapshot());
 	int connection = SPI_connect();
     if (connection < 0) {
 		ereport(ERROR, (errcode(ERRCODE_CONNECTION_FAILURE),
 					errmsg("Failed to connect to database")));
 	}
 	elog(LOG, "Created connection for query");
-    // Execute the chunked query using SPI_exec
     elog(LOG, "Executing SPI_execute query %s", buf.data);
-    int status = SPI_execute(buf.data, false, 0);
+    int status = SPI_execute(buf.data, /*read_only=*/true, /*count=*/0);
     elog(LOG, "Executed SPI_execute command with status %d", status);	
 	if (status < 0) {
 		ereport(ERROR, (errcode(ERRCODE_CONNECTION_FAILURE),
 					errmsg("Failed to fetch tables to export.")));
 	}
-	SPI_finish();
 
 	if (!SPI_processed) {
 		*num_of_tables = 0;
 		return;
 	}
-
+	elog(LOG, "Beginning processing of %d rows", SPI_processed);
 	int valid_entries = 0;
-	*entries = (ExportEntry*)palloc(sizeof(ExportEntry) * SPI_processed);
 
 	// Calaculate number of vvalid entries to export.
 	for (int i = 0; i < SPI_processed; i += 1) {
 		bool isnull;
 		bool is_valid_entry = false;
-		Datum last_completed_datum = SPI_getbinval(SPI_tuptable->vals[i], SPI_tuptable->tupdesc, 2, &isnull);
+		Datum last_completed_datum = SPI_getbinval(SPI_tuptable->vals[i], SPI_tuptable->tupdesc, 3, &isnull);
+		elog(LOG, "Read last completed datum");
 		if (isnull) {
 			// Table is newly scheduled for export so last run completed is null
 			is_valid_entry = true;
+			elog(LOG, "last completed datum is null");
 		} else {
-			Datum export_frequency_datum = SPI_getbinval(SPI_tuptable->vals[i], SPI_tuptable->tupdesc, 3, &isnull);
+			Datum export_frequency_datum = SPI_getbinval(SPI_tuptable->vals[i], SPI_tuptable->tupdesc, 4, &isnull);
 			int export_frequency = DatumGetInt16(export_frequency_datum);
 			int last_completed_timestamp = DatumGetTimestamp(last_completed_datum);
 			time_t current_time = time(NULL);
@@ -393,47 +415,71 @@ static void get_tables_to_process_in_order(ExportEntry **entries, int *num_of_ta
 		if (is_valid_entry) {
 			valid_entries += 1;
 
-			Datum name_datum = SPI_getbinval(SPI_tuptable->vals[i], SPI_tuptable->tupdesc, 0, &isnull);
+			Datum name_datum = SPI_getbinval(SPI_tuptable->vals[i], SPI_tuptable->tupdesc, 1, &isnull);
 			char *table_name = TextDatumGetCString(name_datum);
 
-			ArrayType* arr = DatumGetArrayTypeP(SPI_getbinval(SPI_tuptable->vals[i], SPI_tuptable->tupdesc, 1, &isnull));
+			ArrayType* arr = DatumGetArrayTypeP(SPI_getbinval(SPI_tuptable->vals[i], SPI_tuptable->tupdesc, 2, &isnull));
 			Datum *column_datums;
 			int num_of_columns;
 			deconstruct_array(arr, TEXTOID, -1, false, TYPALIGN_INT, &column_datums, NULL, &num_of_columns);
 
-			ExportEntry *entry;
+			ExportEntry entry;
 			initialize_export_entry(table_name, num_of_columns, &entry);
 
 			for (int j = 0; j < num_of_columns; j += 1) {
-				char *column_name = TextDatumGetCString(column_datums[i]);
-				export_entry_add_column(entry, column_name, i);
+				char *column_name = TextDatumGetCString(column_datums[j]);
+				export_entry_add_column(&entry, column_name, j);
 			}
-			(*entries)[i] = *entry;
+			entries[i] = entry;
 		}
 	}
 	*num_of_tables = valid_entries;
+	SPI_finish();
+	PopActiveSnapshot();
+	CommitTransactionCommand();
 }
 
 static void setup_data_directories(const char *table_name) {
-	char *base_path = strcat("./pg_analytica/", table_name);
-	char *temp_path = strcat(base_path, "/temp");
+	// TODO -move this logic to common dir util functions
+	char cwd[PATH_MAX];
+	if (getcwd(cwd, sizeof(cwd)) != NULL) {
+    	elog(LOG, "Current working directory: %s\n", cwd);
+  	}
+	char root_path[100];
+	strcat(root_path, cwd);
+	strcat(root_path, "/pg_analytica");
+	elog(LOG, "Setting up root directory %s", root_path);
+	char base_path[200];
+	strcat(base_path, cwd);
+	strcat(base_path, "/pg_analytica/");
+	strcat(base_path, table_name);
+	elog(LOG, "Setting up base directory %s", base_path);
+	char temp_path[400];
+	strcpy(temp_path, base_path);
+	strcat(temp_path, "/temp");
+	elog(LOG, "Setting up temp directory %s", temp_path);
 
+	// Create root data directory if not exists.
+	if (mkdir(root_path, 0755) == -1) {
+		perror("mkdir");
+		elog(LOG, "Failed to create root directoy %s", root_path);
+	}
+
+	
 	// Create base data directory if not exists.
-	if (!access(base_path, F_OK) == 0) {
-		if (errno == ENOENT) {
-			if (mkdir(base_path, 0755) == -1) {
-				elog(ERROR, "Failed to create data directoy %s", base_path);
-			}
-		}
+	if (mkdir(base_path, 0755) == -1) {
+		perror("mkdir");
+		elog(LOG, "Failed to create data directoy %s", base_path);
 	}
+
+	
 	// Create temp directory if not exists.
-	if (!access(temp_path, F_OK) == 0) {
-		if (errno == ENOENT) {
-			if (mkdir(temp_path, 0755) == -1) {
-				elog(ERROR, "Failed to create data directoy %s", temp_path);
-			}
-		}
+	if (mkdir(temp_path, 0755) == -1) {
+		perror("mkdir");
+		elog(LOG, "Failed to create data directoy %s", temp_path);
 	}
+		
+	
 	// Delete content in temp directory.
 	DIR *dir = opendir(temp_path);
 	struct dirent *entry;
@@ -446,42 +492,18 @@ static void setup_data_directories(const char *table_name) {
 			continue;
 		}
 		if (unlink(filepath) == -1) {
-			elog(ERROR, "Failed to delete temp file %s", filepath);
+			elog(LOG, "Failed to delete temp file %s", filepath);
 		}
 		
 	}
 	closedir(dir);
+	elog(LOG, "Data directory setup complete for %s", table_name);
 }
 
-/**
- * Use SPI to read rows from table.
- * https://www.postgresql.org/docs/current/spi.html
-*/
-void
-ingestor_main()
-{
-	elog(LOG, "Background worker main called");
+void export_table_data(ExportEntry entry) {
 	int offset = 0;
 	int processed_count;
 	int select;
-
-	bits32		flags = 0;
-	BackgroundWorkerUnblockSignals();
-	BackgroundWorkerInitializeConnection("postgres", "sushrutshivaswamy", flags);
-
-	int num_of_tables;
-	ExportEntry *entries;
-	elog(LOG, "Fetching tables to export");
-	get_tables_to_process_in_order(&entries, &num_of_tables);
-	elog(LOG, "Beginning export for %d tables", num_of_tables);
-
-	for (int i = 0; i < num_of_tables; i += 1) {
-		char *table_name = entries[i].table_name;
-		setup_data_directories(table_name);
-
-		elog(LOG, "Starting export for %s", table_name);
-	}
-
 
 	SetCurrentStatementStartTimestamp();
 	StartTransactionCommand();
@@ -495,17 +517,31 @@ ingestor_main()
 
 	int total_columns;
 	elog(LOG, "Trying to extract column types");
-	ColumnInfo *column_info = get_column_types(&total_columns);
+	ColumnInfo *column_info = get_column_types(entry.table_name, &total_columns);
 	elog(LOG, "Extracted %d column types", total_columns);
 
 	GArrowSchema *arrow_schema = create_table_schema(column_info, total_columns);
-	elog(LOG, "Created arow schema");
+	
+	int chunk = 0;
+	char column_str[1000];
+	for (int i = 0; i < entry.num_of_columns - 1; i += 1) {
+		strcat(column_str, entry.columns_to_export[i]);
+		strcat(column_str, ", ");
+	}
+	strcat(column_str, entry.columns_to_export[entry.num_of_columns - 1]);
+
 	do {
 
 		StringInfoData buf;
 		initStringInfo(&buf);
 		// TODO - order of columns in result should match schema columns
-		appendStringInfo(&buf, "SELECT * FROM distributors LIMIT %d OFFSET %d;", 20, offset);
+		appendStringInfo(&buf, 
+			"SELECT %s FROM %s LIMIT %d OFFSET %d;", 
+			column_str, 
+			entry.table_name, 
+			20, 
+			offset
+		);
 
 		// Execute the chunked query using SPI_exec
 		elog(LOG, "Executing SPI_execute query %s", buf.data);
@@ -523,21 +559,50 @@ ingestor_main()
 		if (processed_count > 0) {
 			GArrowTable *arrow_table = create_arrow_table(arrow_schema, column_info, total_columns);
 			// write to disk
-			write_arrow_table(arrow_schema, arrow_table);
-
-			g_object_unref(arrow_table);
+			write_arrow_table(entry.table_name, chunk, arrow_schema, arrow_table);
+			chunk += 1;
 		}
 		// Increment offset by number of processed rows
 		offset += processed_count;
 	} while (processed_count > 0);
-	
+
 	g_object_unref(arrow_schema);
+	pfree(column_info);
+
 	SPI_finish();
 	PopActiveSnapshot();
 	CommitTransactionCommand();
+}
 
-	pfree(column_info);
-	elog(LOG, "SPI_finish called");
+/**
+ * Use SPI to read rows from table.
+ * https://www.postgresql.org/docs/current/spi.html
+*/
+void
+ingestor_main()
+{
+	elog(LOG, "Background worker main called");
+	bits32		flags = 0;
+	BackgroundWorkerUnblockSignals();
+	BackgroundWorkerInitializeConnection("postgres", "sushrutshivaswamy", flags);
+
+	int num_of_tables;
+	ExportEntry entries[MAX_EXPORT_ENTRIES];
+	elog(LOG, "Fetching tables to export");
+	get_tables_to_process_in_order(&entries, &num_of_tables);
+	elog(LOG, "Beginning export for %d tables", num_of_tables);
+
+	for (int i = 0; i < num_of_tables; i += 1) {
+		char *table_name = entries[i].table_name;
+		elog(LOG, "Creating data directory for %s with %d columns", table_name, entries[i].num_of_columns);
+		setup_data_directories(table_name);
+
+		elog(LOG, "Starting export for %s", table_name);
+		export_table_data(entries[i]);
+		elog(LOG, "Freeing export entry");
+		free_export_entry(&entries[i]);
+		elog(LOG, "Freed export entry");
+	}
 	exit(0);
 }
 
@@ -545,18 +610,6 @@ ingestor_main()
 Datum
 ingestor_launch(PG_FUNCTION_ARGS)
 {
-	// Extract table name
-	char*		table_name = text_to_cstring(PG_GETARG_TEXT_PP(0));
-	Assert(strlen(table_name) > 0);
-	// Extract columns
-	ArrayType  *arr = PG_GETARG_ARRAYTYPE_P(1);
-	Assert(ARR_NDIM(arr) == 1);
-	Assert(ARR_ELEMTYPE(arr) == TEXTOID);
-	Datum	   *column_datums;
-	int num_of_columns;
-	deconstruct_array(arr, TEXTOID, -1, false, TYPALIGN_INT, &column_datums, NULL, &num_of_columns);
-	Assert(num_of_columns > 0);
-
 	pid_t		pid;
 	BackgroundWorker worker;
 	BackgroundWorkerHandle *handle;

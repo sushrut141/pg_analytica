@@ -3,6 +3,7 @@
 
 #include <string.h>
 
+#include "utils/elog.h"
 #include "utils/palloc.h"
 
 /**
@@ -15,15 +16,13 @@ typedef struct _ExportEntry {
 	int num_of_columns;
 } ExportEntry;
 
-void initialize_export_entry(const char *table_name, int num_of_columns, ExportEntry **entry) {
-    // Initialize memory for entry.
-    *entry = (ExportEntry*)palloc(sizeof(ExportEntry));
+void initialize_export_entry(const char *table_name, int num_of_columns, ExportEntry *entry) {
     // Initialize memory for column names.
-    (*entry)->num_of_columns = num_of_columns;
-    (*entry)->columns_to_export = (char**)palloc(num_of_columns * sizeof(char*));
+    entry->num_of_columns = num_of_columns;
+    entry->columns_to_export = (char**)palloc(num_of_columns * sizeof(char*));
     // Initialize memory and set table name.
-    (*entry)->table_name = (char*)palloc(strlen(table_name) * sizeof(char));
-    strcpy((*entry)->table_name, table_name);
+    entry->table_name = (char*)palloc(strlen(table_name) * sizeof(char));
+    strcpy(entry->table_name, table_name);
 }
 
 void export_entry_add_column(ExportEntry *entry, char *column_name, int column_num) {
@@ -34,11 +33,14 @@ void export_entry_add_column(ExportEntry *entry, char *column_name, int column_n
 
 void free_export_entry(ExportEntry *entry) {
     pfree(entry->table_name);
+    elog(LOG, "Freed entry table name");
     for (int i = 0; i < entry->num_of_columns; i += 1) {
+        elog(LOG, "Freeing column name %s", entry->columns_to_export[i]);
         pfree(entry->columns_to_export[i]);
     }
+    elog(LOG, "Freed column names");
     pfree(entry->columns_to_export);
-    pfree(entry);
+    elog(LOG, "Freed column name container");
 }
 
 #endif
