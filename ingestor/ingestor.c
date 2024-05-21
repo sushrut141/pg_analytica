@@ -368,7 +368,8 @@ static void get_tables_to_process_in_order(ExportEntry *entries, int *num_of_tab
 		table_name,             \
 		columns_to_export,      \
 		last_run_completed,     \
-		export_frequency_hours  \
+		export_frequency_hours,  \
+		now() \
 	FROM analytica_exports      \
 	ORDER BY last_run_completed \
 	LIMIT %d;" , MAX_EXPORT_ENTRIES);
@@ -411,13 +412,21 @@ static void get_tables_to_process_in_order(ExportEntry *entries, int *num_of_tab
 			elog(LOG, "Evaluating if older export entry is past threshold");
 			Datum export_frequency_datum = SPI_getbinval(SPI_tuptable->vals[i], SPI_tuptable->tupdesc, 4, &isnull);
 			int export_frequency = DatumGetInt16(export_frequency_datum);
-			// TODO - fix reading timestamp from datum
-			int64_t last_completed_timestamp = DatumGetTimestamp(last_completed_datum) / 1000000;
-			time_t current_time = time(NULL);
-			elog(LOG, "last completed %d", last_completed_timestamp);
-			elog(LOG, "current %d", current_time);
-			int hours_elapsed = (current_time - last_completed_timestamp) / 3600;
-			elog(LOG, "%d hours elapsed since last export");
+			
+			int64 last_completed = DatumGetTimestampTz(last_completed_datum);
+			int64 last_run_pg_time = timestamptz_to_time_t(last_completed);
+
+			Datum current_time_datum = SPI_getbinval(SPI_tuptable->vals[i], SPI_tuptable->tupdesc, 5, &isnull);
+			TimestampTz current_time = DatumGetTimestampTz(current_time_datum);
+			int64 current_time_pg_time = timestamptz_to_time_t(current_time);
+
+			elog(LOG, "last run time %lld", last_run_pg_time);
+			elog(LOG, "current time %lld", current_time_pg_time);
+			
+			int64 seconds_elapsed = (current_time_pg_time - last_run_pg_time);
+			elog(LOG, "seconds lapsed are %lld", seconds_elapsed);
+			uint64 hours_elapsed = (seconds_elapsed) / 3600;
+			elog(LOG, "%lld hours elapsed since last export", hours_elapsed);
 			if (hours_elapsed > export_frequency) {
 				is_valid_entry = true;
 				elog(LOG, "Marking older entry for export again");

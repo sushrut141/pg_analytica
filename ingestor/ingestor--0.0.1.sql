@@ -4,7 +4,7 @@
 -- Table to store export metadata
 CREATE TABLE analytica_exports (
     table_name    text PRIMARY KEY,
-    last_run_completed timestamp,
+    last_run_completed TIMESTAMP WITH TIME ZONE,
     columns_to_export text[],
     export_frequency_hours int,
     export_status int
