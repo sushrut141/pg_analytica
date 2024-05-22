@@ -360,6 +360,35 @@ static void write_arrow_table(
 	elog(LOG, "Sucessfully wrote columnar file to disk.");
 }
 
+void delete_export_entry(const char *table_name) {
+	StringInfoData buf;
+    initStringInfo(&buf);
+    appendStringInfo(
+		&buf, 
+        "DELETE FROM analytica_exports WHERE table_name = '%s';",
+		table_name
+	);
+
+	SetCurrentStatementStartTimestamp();
+	StartTransactionCommand();
+	PushActiveSnapshot(GetTransactionSnapshot());
+	int connection = SPI_connect();
+    if (connection < 0) {
+		ereport(ERROR, (errcode(ERRCODE_CONNECTION_FAILURE),
+					errmsg("Failed to connect to database")));
+	}
+    elog(LOG, "Executing SPI_execute query %s", buf.data);
+    int status = SPI_execute(buf.data, /*read_only=*/false, /*count=*/0);
+    elog(LOG, "Executed SPI_execute command with status %d", status);	
+	if (status != SPI_OK_DELETE) {
+		ereport(ERROR, (errcode(ERRCODE_CONNECTION_FAILURE),
+					errmsg("Failed to delete export entry.")));
+	}
+	SPI_finish();
+	PopActiveSnapshot();
+	CommitTransactionCommand();
+}
+
 static void get_tables_to_process_in_order(ExportEntry *entries, int *num_of_tables) {
 	StringInfoData buf;
     initStringInfo(&buf);
@@ -369,6 +398,7 @@ static void get_tables_to_process_in_order(ExportEntry *entries, int *num_of_tab
 		columns_to_export,      \
 		last_run_completed,     \
 		export_frequency_hours,  \
+		export_status, \
 		now() \
 	FROM analytica_exports      \
 	ORDER BY last_run_completed \
@@ -416,7 +446,7 @@ static void get_tables_to_process_in_order(ExportEntry *entries, int *num_of_tab
 			int64 last_completed = DatumGetTimestampTz(last_completed_datum);
 			int64 last_run_pg_time = timestamptz_to_time_t(last_completed);
 
-			Datum current_time_datum = SPI_getbinval(SPI_tuptable->vals[i], SPI_tuptable->tupdesc, 5, &isnull);
+			Datum current_time_datum = SPI_getbinval(SPI_tuptable->vals[i], SPI_tuptable->tupdesc, 6, &isnull);
 			TimestampTz current_time = DatumGetTimestampTz(current_time_datum);
 			int64 current_time_pg_time = timestamptz_to_time_t(current_time);
 
@@ -434,6 +464,16 @@ static void get_tables_to_process_in_order(ExportEntry *entries, int *num_of_tab
 				elog(LOG, "Older export entry threshold han;t passed");
 			}
 		}
+
+		/**
+		 * Surface inactive entries for cleanup later.
+		 */
+		Datum export_status_datum = SPI_getbinval(SPI_tuptable->vals[i], SPI_tuptable->tupdesc, 5, &isnull);
+		int export_status = DatumGetInt32(export_status_datum);
+		if (export_status == INACTIVE) {
+			is_valid_entry = true;
+		}
+
 		if (is_valid_entry) {
 			valid_entries += 1;
 
@@ -447,6 +487,7 @@ static void get_tables_to_process_in_order(ExportEntry *entries, int *num_of_tab
 
 			ExportEntry entry;
 			initialize_export_entry(table_name, num_of_columns, &entry);
+			entry.export_status = export_status;
 
 			for (int j = 0; j < num_of_columns; j += 1) {
 				char *column_name = TextDatumGetCString(column_datums[j]);
@@ -693,6 +734,19 @@ void update_table_export_metadata(const char *table_name) {
 	CommitTransactionCommand();
 }
 
+void cleanup_inactive_export(const char *table_name) {
+	elog(LOG, "Cleaning up data for table %s", table_name);
+	// delete data directories
+	int status = cleanup_table_data(table_name);
+	if (status != 0) {
+		elog(LOG, "Failed to cleanup data for table %s", table_name);
+		return;
+	}
+	// delete metadata entry
+	delete_export_entry(table_name);
+	elog(LOG, "Cleaned up data for table %s", table_name);
+}
+
 /**
  * Use SPI to read rows from table.
  * https://www.postgresql.org/docs/current/spi.html
@@ -713,6 +767,14 @@ ingestor_main()
 
 	for (int i = 0; i < num_of_tables; i += 1) {
 		char *table_name = entries[i].table_name;
+
+		if (entries[i].export_status == INACTIVE) {
+			elog(LOG, "Cleaning up inactive entry");
+			cleanup_inactive_export(table_name);
+			free_export_entry(&entries[i]);
+			continue;
+		}
+
 		elog(LOG, "Creating data directory for %s with %d columns", table_name, entries[i].num_of_columns);
 		setup_data_directories(table_name);
 

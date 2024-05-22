@@ -14,6 +14,7 @@ typedef struct _ExportEntry {
 	char *table_name;
 	char **columns_to_export;
 	int num_of_columns;
+    int export_status;
 } ExportEntry;
 
 void initialize_export_entry(const char *table_name, int num_of_columns, ExportEntry *entry) {

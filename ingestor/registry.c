@@ -104,17 +104,20 @@ Datum unregister_table_export(PG_FUNCTION_ARGS) {
     StringInfoData buf;
     initStringInfo(&buf);
     appendStringInfo(
-        &buf, 
-        "DELETE FROM analytica_exports WHERE table_name = '%s';",
-        table_name
-    );
+		&buf, 
+		"UPDATE analytica_exports        \
+		 SET export_status = %d \
+		 WHERE table_name = '%s';", 
+		INACTIVE,
+		table_name
+	);
 
     int status = execute_query(buf);
     if (status < 0) {
         ereport(ERROR, (errcode(ERRCODE_CONNECTION_FAILURE),
-                    errmsg("Query execution failed")));
+                    errmsg("Failed to unregister table.")));
     }
 
-    elog(LOG, "Removed export for table %s. Table data will be deleted at next available window.", table_name);
+    elog(LOG, "Marked %s table export as inactive. Table data will be deleted at next available window.", table_name);
     PG_RETURN_INT32(1);
 }

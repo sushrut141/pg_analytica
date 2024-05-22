@@ -17,7 +17,7 @@ AS 'MODULE_PATHNAME'
 LANGUAGE C STRICT VOLATILE;
 
 -- Un-register a table for export and delete columnar data directory.
-CREATE OR REPLACE FUNCTION unregister_Table_export(table_name text)
+CREATE OR REPLACE FUNCTION unregister_table_export(table_name text)
 RETURNS bigint
 AS 'MODULE_PATHNAME'
 LANGUAGE C VOLATILE;
