@@ -83,3 +83,19 @@ SELECT * from read_parquet('/opt/homebrew/var/postgresql@14/sample.parquet');
 
  - Update ingestor to export multiple parquet files from table
  - Test query performance with large dataset
+
+ ## Export timings
+
+Time to export can be reduced with variable exort chunk sizes.
+Users can choose larger chunk size depending on size of row and system memory.
+
+  - Table Size little over 2GiB
+      - 30M rows with 2 int64 columns and a varchar column exported
+      - export chunk size 10k
+      - start time 12:21 PM
+      - 10M / 30M rows processed at 12:33 PM
+      - Finished processing at 13:34 PM
+      - Overal export time - 1hr 13m
+      - Max Memory usage - 3.2GiB
+         - Explore creating parquet file without creating intermedaite in-memory store
+      - 3k columnar files exported

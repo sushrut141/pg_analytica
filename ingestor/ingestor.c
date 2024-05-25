@@ -44,6 +44,7 @@ PGDLLEXPORT void ingestor_main(void) pg_attribute_noreturn();
 #define MAX_COLUMN_NAME_CHARS 100
 #define MAX_SUPPORTED_COLUMNS 100
 #define MAX_EXPORT_ENTRIES 10
+#define MAX_COLUMN_EXPORT_BATCH 10000
 
 /** Arrow functionality */
 #define ASSIGN_IF_NOT_NULL(check_ptr, dest_ptr)                                \
@@ -181,7 +182,9 @@ static ColumnInfo* get_column_types(const char *table_name, int* num_of_columns)
 * Creates Arrow schema for the table for basic types. 
 * Caller is reponsible for freeing schema memory.
 */
-static GArrowSchema* create_table_schema(const ColumnInfo *column_info, int num_columns) {
+static GArrowSchema* create_table_schema(
+	const ColumnInfo *column_info,
+	const ExportEntry *entry, int overall_num_columns) {
 	GError *error = NULL;
 	GList *fields = NULL;
 	GArrowSchema *temp = NULL;
@@ -189,9 +192,19 @@ static GArrowSchema* create_table_schema(const ColumnInfo *column_info, int num_
 	// Define data schema
 	elog(LOG, "Creating arrow schema");
     temp = garrow_schema_new(fields);
-	for (int i = 0; i < num_columns; i += 1) {
-		const char *column_name = column_info[i].column_name;
-		Oid column_type = column_info[i].column_type;
+	for (int i = 0; i < entry->num_of_columns; i += 1) {
+		const char *column_name = entry->columns_to_export[i];
+		// TODO - move column type deduction to util
+		Oid column_type;
+		bool column_type_found = false;
+		for (int j = 0; j < overall_num_columns; j += 1) {
+			if (strcmp(column_info[j].column_name, column_name) == 0) {
+				column_type = column_info[j].column_type;
+				column_type_found = true;
+				break;
+			}
+		}
+		Assert(column_type_found);
 		switch (column_type) {
 			case INT2OID:
 			case INT4OID:
@@ -254,15 +267,17 @@ static char** create_string_data_array(Datum* data, int num_values) {
  */
 static GArrowTable* create_arrow_table(
 	GArrowSchema* schema,
-	const ColumnInfo *column_info, 
-	int num_columns
+	const ColumnInfo *column_info,
+	const ExportEntry * entry, 
+	int overall_num_columns
 ) {
 	Assert(SPI_processed > 0);
 	elog(LOG, "Creating arrow table");
-	GArrowArray **arrow_arrays = (GArrowArray **)palloc(num_columns * sizeof(GArrowArray));
-	Datum **table_data = (Datum**)palloc(num_columns * sizeof(Datum*));
+	int num_export_columns = entry->num_of_columns;
+	GArrowArray **arrow_arrays = (GArrowArray **)palloc(num_export_columns * sizeof(GArrowArray));
+	Datum **table_data = (Datum**)palloc(num_export_columns * sizeof(Datum*));
 	// Iterate over all rows for each column and create Datum Arays for each column
-	for (int i = 0; i < num_columns; i += 1) {
+	for (int i = 0; i < num_export_columns; i += 1) {
 		// Copy datums to temp variable to access all datums for a column
 		table_data[i] = (Datum*)palloc(SPI_processed * sizeof(Datum));
 		for (int j = 0; j < SPI_processed; j += 1) {
@@ -279,9 +294,19 @@ static GArrowTable* create_arrow_table(
 	// TODO - handle error
 	GError *error = NULL;
 	// Populate arrow arrays for each column
-	for (int i = 0; i < num_columns; i += 1) {
-		const ColumnInfo info = column_info[i];
-		Oid column_type = info.column_type;
+	for (int i = 0; i < num_export_columns; i += 1) {
+		// TODO - move column type deduction to util
+		const char *column_name = entry->columns_to_export[i];
+		Oid column_type;
+		bool column_type_found = false;
+		for (int j = 0; j < overall_num_columns; j += 1) {
+			if (strcmp(column_info[j].column_name, column_name) == 0) {
+				column_type = column_info[j].column_type;
+				column_type_found = true;
+				break;
+			}
+		}
+		Assert(column_type_found);
 		switch (column_type) {
 			case INT2OID:
 			case INT4OID:
@@ -308,10 +333,10 @@ static GArrowTable* create_arrow_table(
 				break;
 		}
 	}
-	GArrowTable *table = garrow_table_new_arrays(schema, arrow_arrays, num_columns, &error);
+	GArrowTable *table = garrow_table_new_arrays(schema, arrow_arrays, num_export_columns, &error);
 	LOG_ARROW_ERROR(error);
 
-	for (int i = 0; i < num_columns; i += 1) {
+	for (int i = 0; i < num_export_columns; i += 1) {
 		g_object_unref(arrow_arrays[i]);
 		pfree(table_data[i]);
 	}
@@ -631,7 +656,7 @@ char* get_columns_string(char **columns, int num_of_columns) {
 
 void export_table_data(ExportEntry entry) {
 	int offset = 0;
-	int processed_count;
+	int64 processed_count;
 	int select;
 
 	SetCurrentStatementStartTimestamp();
@@ -649,7 +674,7 @@ void export_table_data(ExportEntry entry) {
 	ColumnInfo *column_info = get_column_types(entry.table_name, &total_columns);
 	elog(LOG, "Extracted %d column types", total_columns);
 
-	GArrowSchema *arrow_schema = create_table_schema(column_info, total_columns);
+	GArrowSchema *arrow_schema = create_table_schema(column_info, &entry, total_columns);
 	
 	int chunk = 0;
 	char* column_str = get_columns_string(entry.columns_to_export, entry.num_of_columns);
@@ -662,7 +687,7 @@ void export_table_data(ExportEntry entry) {
 			"SELECT %s FROM %s LIMIT %d OFFSET %d;", 
 			column_str, 
 			entry.table_name, 
-			20, 
+			MAX_COLUMN_EXPORT_BATCH, 
 			offset
 		);
 
@@ -680,7 +705,12 @@ void export_table_data(ExportEntry entry) {
 		elog(LOG, "Processed %d rows", processed_count);
 		elog(LOG, "Number of rows is %lu", SPI_tuptable->numvals);
 		if (processed_count > 0) {
-			GArrowTable *arrow_table = create_arrow_table(arrow_schema, column_info, total_columns);
+			GArrowTable *arrow_table = create_arrow_table(
+				arrow_schema,
+				column_info,
+				&entry,
+				total_columns
+			);
 			// write to disk
 			write_arrow_table(entry.table_name, chunk, arrow_schema, arrow_table);
 			chunk += 1;
@@ -688,7 +718,7 @@ void export_table_data(ExportEntry entry) {
 		// Increment offset by number of processed rows
 		offset += processed_count;
 	} while (processed_count > 0);
-
+	elog(LOG, "Finished processing %lld rows", processed_count);
 	pfree(column_str);
 	// Move files from temp directly to data directory.
 	move_temp_files(entry.table_name);
