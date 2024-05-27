@@ -52,7 +52,7 @@ Datum register_table_export(PG_FUNCTION_ARGS) {
     // TODO - add validation to ensure table exists 
     // and column types are supported for export
     int num_of_args = PG_NARGS();
-    if (num_of_args != 3) {
+    if (num_of_args != 4) {
         ereport(ERROR, (errcode(ERRCODE_RAISE_EXCEPTION),
 						errmsg("Invalid number of arguments. Expected format is register_export(table_name text, columns_to_export text[], export_frequency_hours int)")));
     }
@@ -70,16 +70,18 @@ Datum register_table_export(PG_FUNCTION_ARGS) {
     elog(LOG, "Created column string  as %s", column_str);
     // Extract export frequency
     int32 export_frequency_hours = PG_GETARG_INT32(2);
+    int64 chunk_size = PG_GETARG_INT32(3);
 
     StringInfoData buf;
     initStringInfo(&buf);
     appendStringInfo(
         &buf, 
-        "INSERT INTO analytica_exports (table_name, columns_to_export, export_frequency_hours, export_status) VALUES ('%s', '{%s}', %d, %d);",
+        "INSERT INTO analytica_exports (table_name, columns_to_export, export_frequency_hours, export_status, chunk_size) VALUES ('%s', '{%s}', %d, %d, %ld);",
         table_name,
         column_str,
         export_frequency_hours,
-        PENDING
+        PENDING,
+        chunk_size
     );
 
     int status = execute_query(buf);

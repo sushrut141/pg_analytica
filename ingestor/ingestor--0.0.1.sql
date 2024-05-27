@@ -7,11 +7,16 @@ CREATE TABLE analytica_exports (
     last_run_completed TIMESTAMP WITH TIME ZONE,
     columns_to_export text[],
     export_frequency_hours int,
-    export_status int
+    export_status int,
+    chunk_size int
 );
 
 -- Register a postgres table for export
-CREATE OR REPLACE FUNCTION register_table_export(table_name text, columns_to_export text[], export_frequency_hours int)
+CREATE OR REPLACE FUNCTION register_table_export(
+    table_name text, 
+    columns_to_export text[], 
+    export_frequency_hours int, 
+    chunk_size int DEFAULT 100000)
 RETURNS bigint
 AS 'MODULE_PATHNAME'
 LANGUAGE C STRICT VOLATILE;

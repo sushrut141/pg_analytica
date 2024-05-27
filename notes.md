@@ -71,18 +71,39 @@ $ duckdb
 SELECT * from read_parquet('/opt/homebrew/var/postgresql@14/sample.parquet');
 ```
 
+# Query using Parquet Foreign Data Wrapper
+ - https://github.com/adjust/parquet_fdw/blob/master/README.md
 
-## Tasks
+# Query timings
 
- - Load large dataset (10GiB) into postgres table
- - Create a way to schedule export for a table at regular intervals
- - Create a way to drop columnar table
- - Create table to maintain state about export progress (number of rows processed)
- - Add logic to atomically replace columnar data directory for a table after export is complete
- - Add logic to loop over all registered tables and export data
+Measured using the timing feature in postgres.
+ - Table Size little over 2GiB
+    - 30M rows with 2 int64 columns and a varchar column exported
 
- - Update ingestor to export multiple parquet files from table
- - Test query performance with large dataset
+```
+\timing on
+```
+
+ - select with group by and filter
+```
+SELECT 
+    age,
+    COUNT(*) 
+FROM test_data_columnar
+WHERE age > 50 AND age < 90 AND id > 1000
+GROUP BY age;
+
+Time: 1633.900 ms (00:01.634)
+
+SELECT 
+    age,
+    COUNT(*) 
+FROM test_data
+WHERE age > 50 AND age < 90 AND id > 1000
+GROUP BY age;
+
+Time: 5153.393 ms (00:05.153)
+```
 
  ## Export timings
 
@@ -97,5 +118,4 @@ Users can choose larger chunk size depending on size of row and system memory.
       - Finished processing at 13:34 PM
       - Overal export time - 1hr 13m
       - Max Memory usage - 3.2GiB
-         - Explore creating parquet file without creating intermedaite in-memory store
       - 3k columnar files exported

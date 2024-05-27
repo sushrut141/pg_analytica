@@ -44,7 +44,6 @@ PGDLLEXPORT void ingestor_main(void) pg_attribute_noreturn();
 #define MAX_COLUMN_NAME_CHARS 100
 #define MAX_SUPPORTED_COLUMNS 100
 #define MAX_EXPORT_ENTRIES 10
-#define MAX_COLUMN_EXPORT_BATCH 10000
 
 /** Arrow functionality */
 #define ASSIGN_IF_NOT_NULL(check_ptr, dest_ptr)                                \
@@ -277,6 +276,8 @@ static GArrowTable* create_arrow_table(
 	GArrowArray **arrow_arrays = (GArrowArray **)palloc(num_export_columns * sizeof(GArrowArray));
 	Datum **table_data = (Datum**)palloc(num_export_columns * sizeof(Datum*));
 	// Iterate over all rows for each column and create Datum Arays for each column
+	// Datums are just pointers to the actual data so the additional memory of
+	// creating temp datums array is very low.
 	for (int i = 0; i < num_export_columns; i += 1) {
 		// Copy datums to temp variable to access all datums for a column
 		table_data[i] = (Datum*)palloc(SPI_processed * sizeof(Datum));
@@ -424,6 +425,7 @@ static void get_tables_to_process_in_order(ExportEntry *entries, int *num_of_tab
 		last_run_completed,     \
 		export_frequency_hours,  \
 		export_status, \
+		chunk_size, \
 		now() \
 	FROM analytica_exports      \
 	ORDER BY last_run_completed \
@@ -471,7 +473,7 @@ static void get_tables_to_process_in_order(ExportEntry *entries, int *num_of_tab
 			int64 last_completed = DatumGetTimestampTz(last_completed_datum);
 			int64 last_run_pg_time = timestamptz_to_time_t(last_completed);
 
-			Datum current_time_datum = SPI_getbinval(SPI_tuptable->vals[i], SPI_tuptable->tupdesc, 6, &isnull);
+			Datum current_time_datum = SPI_getbinval(SPI_tuptable->vals[i], SPI_tuptable->tupdesc, 7, &isnull);
 			TimestampTz current_time = DatumGetTimestampTz(current_time_datum);
 			int64 current_time_pg_time = timestamptz_to_time_t(current_time);
 
@@ -505,6 +507,9 @@ static void get_tables_to_process_in_order(ExportEntry *entries, int *num_of_tab
 			Datum name_datum = SPI_getbinval(SPI_tuptable->vals[i], SPI_tuptable->tupdesc, 1, &isnull);
 			char *table_name = TextDatumGetCString(name_datum);
 
+			Datum chunk_size_datum = SPI_getbinval(SPI_tuptable->vals[i], SPI_tuptable->tupdesc, 6, &isnull);
+			int64 chunk_size = DatumGetInt64(chunk_size_datum);
+
 			ArrayType* arr = DatumGetArrayTypeP(SPI_getbinval(SPI_tuptable->vals[i], SPI_tuptable->tupdesc, 2, &isnull));
 			Datum *column_datums;
 			int num_of_columns;
@@ -513,6 +518,7 @@ static void get_tables_to_process_in_order(ExportEntry *entries, int *num_of_tab
 			ExportEntry entry;
 			initialize_export_entry(table_name, num_of_columns, &entry);
 			entry.export_status = export_status;
+			entry.chunk_size = chunk_size;
 
 			for (int j = 0; j < num_of_columns; j += 1) {
 				char *column_name = TextDatumGetCString(column_datums[j]);
@@ -687,7 +693,7 @@ void export_table_data(ExportEntry entry) {
 			"SELECT %s FROM %s LIMIT %d OFFSET %d;", 
 			column_str, 
 			entry.table_name, 
-			MAX_COLUMN_EXPORT_BATCH, 
+			entry.chunk_size, 
 			offset
 		);
 
