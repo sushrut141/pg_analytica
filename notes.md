@@ -123,6 +123,7 @@ Users can choose larger chunk size depending on size of row and system memory.
 
  - Add export timing metrics to metadata
  - Create busy export loop in background worker
- - Support exporting columnar files sorted by keys
- - Cleanup extension package
  - Figure out how to package fdw extension in pg_analytica
+ - test with all data types including null values
+ 
+ - Support exporting columnar files sorted by keys
