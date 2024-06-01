@@ -85,8 +85,7 @@ static void list_current_directories() {
 
 GArrowArray* create_int64_array(const int64 *data, int num_values, GError *error) {
     GError *inner_error = NULL;
-    GArrowInt32ArrayBuilder *int_array_builder;
-    gboolean success = TRUE;
+    GArrowInt64ArrayBuilder *int_array_builder;
     int_array_builder = garrow_int64_array_builder_new();
     
     for (int i = 0; i < num_values; i++) {
@@ -103,6 +102,75 @@ GArrowArray* create_int64_array(const int64 *data, int num_values, GError *error
     g_object_unref(int_array_builder);
 
     return int_array;
+}
+
+GArrowArray* create_timestamp_array(const int64 *data, int num_values, GError *error) {
+    GError *inner_error = NULL;
+    GArrowTimestampArrayBuilder *timestamp_array_builder;
+	GTimeZone *time_zone = g_time_zone_new_utc();
+	GArrowTimestampDataType *timestamp_data_type = 
+		garrow_timestamp_data_type_new(GARROW_TIME_UNIT_MICRO, time_zone);
+    timestamp_array_builder = garrow_timestamp_array_builder_new(timestamp_data_type);
+    
+    for (int i = 0; i < num_values; i++) {
+        int64 value = data[i];
+        elog(LOG, "Adding value %d to arrow array", value);
+        garrow_timestamp_array_builder_append(timestamp_array_builder, value, &inner_error);
+		LOG_ARROW_ERROR(inner_error);
+        ASSIGN_IF_NOT_NULL(inner_error, error);
+    }
+    GArrowArray *int_array = garrow_array_builder_finish(
+		GARROW_ARRAY_BUILDER(timestamp_array_builder), &inner_error);
+	LOG_ARROW_ERROR(inner_error);
+    ASSIGN_IF_NOT_NULL(inner_error, error);
+
+    g_object_unref(timestamp_array_builder);
+	g_object_unref(timestamp_data_type);
+	g_object_unref(time_zone);
+
+    return int_array;
+}
+
+GArrowArray* create_double_array(const double *data, int num_values, GError *error) {
+    GError *inner_error = NULL;
+    GArrowDoubleArrayBuilder *double_array_builder;
+    double_array_builder = garrow_double_array_builder_new();
+    
+    for (int i = 0; i < num_values; i++) {
+        double value = data[i];
+        elog(LOG, "Adding value %d to arrow array", value);
+        garrow_double_array_builder_append_value(double_array_builder, value, &inner_error);
+		LOG_ARROW_ERROR(inner_error);
+        ASSIGN_IF_NOT_NULL(inner_error, error);
+    }
+    GArrowArray *double_array = garrow_array_builder_finish(
+		GARROW_ARRAY_BUILDER(double_array_builder), &inner_error);
+	LOG_ARROW_ERROR(inner_error);
+    ASSIGN_IF_NOT_NULL(inner_error, error);
+    g_object_unref(double_array_builder);
+
+    return double_array;
+}
+
+GArrowArray* create_bool_array(const bool *data, int num_values, GError *error) {
+    GError *inner_error = NULL;
+    GArrowBooleanArrayBuilder *bool_array_builder;
+    bool_array_builder = garrow_boolean_array_builder_new();
+    
+    for (int i = 0; i < num_values; i++) {
+        double value = data[i];
+        elog(LOG, "Adding value %d to arrow array", value);
+        garrow_boolean_array_builder_append_value(bool_array_builder, value, &inner_error);
+		LOG_ARROW_ERROR(inner_error);
+        ASSIGN_IF_NOT_NULL(inner_error, error);
+    }
+    GArrowArray *double_array = garrow_array_builder_finish(
+		GARROW_ARRAY_BUILDER(bool_array_builder), &inner_error);
+	LOG_ARROW_ERROR(inner_error);
+    ASSIGN_IF_NOT_NULL(inner_error, error);
+    g_object_unref(bool_array_builder);
+
+    return double_array;
 }
 
 GArrowArray* create_string_array(const char **data, int num_values, GError *error) {
@@ -218,6 +286,18 @@ static GArrowSchema* create_table_schema(
 				elog(LOG, "Created schema with string %s", garrow_schema_to_string(temp));
 				break;
 			}
+			case FLOAT4OID:
+			case FLOAT8OID:
+			{
+				GArrowDataType *precision_type = garrow_double_data_type_new();
+				GArrowField *precision_field = garrow_field_new(column_name, precision_type);
+				temp = garrow_schema_add_field(temp, i, precision_field, &error);
+				g_object_unref(precision_field);
+				g_object_unref(precision_type);
+				elog(LOG, "Added field for precision type to arrow schema for column %s", column_name);
+				elog(LOG, "Created schema with string %s", garrow_schema_to_string(temp));
+				break;
+			}
 			case VARCHAROID:
 			{
 				GArrowDataType *string_type = garrow_string_data_type_new();
@@ -226,6 +306,28 @@ static GArrowSchema* create_table_schema(
 				g_object_unref(string_field);
 				g_object_unref(string_type);
 				elog(LOG, "Added field for string type to arrow schema for column %s", column_name);
+				elog(LOG, "Created schema with string %s", garrow_schema_to_string(temp));
+				break;
+			}
+			case BOOLOID:
+			{
+				GArrowDataType *bool_type = garrow_boolean_data_type_new();
+    			GArrowField *bool_field = garrow_field_new(column_name, bool_type);
+				temp = garrow_schema_add_field(temp, i, bool_field, &error);
+				g_object_unref(bool_field);
+				g_object_unref(bool_type);
+				elog(LOG, "Added field for boolean type to arrow schema for column %s", column_name);
+				elog(LOG, "Created schema with string %s", garrow_schema_to_string(temp));
+				break;
+			}
+			case TIMESTAMPOID:
+			{
+				GArrowDataType *timestamp_type = garrow_timestamp_data_type_new(GARROW_TIME_UNIT_MICRO, &error);
+    			GArrowField *timestamp_field = garrow_field_new(column_name, timestamp_type);
+				temp = garrow_schema_add_field(temp, i, timestamp_field, &error);
+				g_object_unref(timestamp_field);
+				g_object_unref(timestamp_type);
+				elog(LOG, "Added field for timestamp type to arrow schema for column %s", column_name);
 				elog(LOG, "Created schema with string %s", garrow_schema_to_string(temp));
 				break;
 			}
@@ -242,18 +344,66 @@ static GArrowSchema* create_table_schema(
 static int64* create_int64_data_array(Datum* data, int num_values) {
 	int64 *int_data = (int64*)palloc(num_values * sizeof(int64));
 	for (int i = 0; i < num_values; i += 1) {
-		int_data[i] = DatumGetInt64(data[i]);
+		if (data[i] == ULONG_MAX) {
+			int_data[i] = 0;
+		} else {
+			int_data[i] = DatumGetInt64(data[i]);
+		}
 		elog(LOG, "Added value %d to array", int_data[i]);
 	}
 	return int_data;
 }
 
+static double* create_double_data_array(Datum* data, int num_values) {
+	double *double_data = (double*)palloc(num_values * sizeof(double));
+	for (int i = 0; i < num_values; i += 1) {
+		if (data[i] == ULONG_MAX) {
+			double_data[i] = 0.0f;
+		} else {
+			double_data[i] = DatumGetFloat8(data[i]);
+		}
+		elog(LOG, "Added value %d to array", double_data[i]);
+	}
+	return double_data;
+}
+
+static double* create_bool_data_array(Datum* data, int num_values) {
+	double *bool_data = (bool*)palloc(num_values * sizeof(bool));
+	for (int i = 0; i < num_values; i += 1) {
+		if (data[i] == ULONG_MAX) {
+			bool_data[i] = false;
+		} else {
+			bool_data[i] = DatumGetBool(data[i]);
+		}
+		elog(LOG, "Added value %d to array", bool_data[i]);
+	}
+	return bool_data;
+}
+
+static int64* create_timestamp_data_array(Datum* data, int num_values) {
+	double *timestamp_data = (bool*)palloc(num_values * sizeof(int64));
+	for (int i = 0; i < num_values; i += 1) {
+		if (data[i] == ULONG_MAX) {
+			timestamp_data[i] = 0;
+		} else {
+			Timestamp pg_timestanp = DatumGetTimestamp(data[i]);
+			timestamp_data[i] = timestamptz_to_time_t(pg_timestanp);
+		}
+		elog(LOG, "Added value %d to array", timestamp_data[i]);
+	}
+	return timestamp_data;
+}
+
 static char** create_string_data_array(Datum* data, int num_values) {
 	char **string_data = (char**)palloc(num_values * sizeof(char*));
 	for (int i = 0; i < num_values; i += 1) {
-		char* cstring = TextDatumGetCString(data[i]);
-		string_data[i] = (char*)palloc(sizeof(char) * strlen(cstring) + 1);
-		strcpy(string_data[i], cstring);
+		if (data[i] == ULONG_MAX) {
+			char* cstring = TextDatumGetCString(data[i]);
+			string_data[i] = (char*)palloc(sizeof(char) * strlen(cstring) + 1);
+			strcpy(string_data[i], cstring);
+		} else {
+			strcpy(string_data[i], "");
+		}
 		elog(LOG, "Added value %s to array", string_data[i]);
 	}
 	return string_data;
@@ -287,7 +437,7 @@ static GArrowTable* create_arrow_table(
 			if (!isnull) {
 				table_data[i][j] = datum;
 			} else {
-				table_data[i][j] = 0;
+				table_data[i][j] = ULONG_MAX;
 			}
 		}
 	}
@@ -320,11 +470,39 @@ static GArrowTable* create_arrow_table(
 				LOG_ARROW_ERROR(error);
 				break;
 			}
+			case FLOAT4OID:
+			case FLOAT8OID:
+			{
+				const double* double_data = create_double_data_array(table_data[i], SPI_processed);
+				arrow_arrays[i] = create_double_array(double_data, SPI_processed, error);
+				pfree(double_data);
+				elog(LOG, "Created int data array");
+				LOG_ARROW_ERROR(error);
+				break;
+			}
 			case VARCHAROID:
 			{
 				const char** string_data = create_string_data_array(table_data[i], SPI_processed);
 				arrow_arrays[i] = create_string_array(string_data, SPI_processed, error);
 				pfree(string_data);
+				elog(LOG, "Created string data array");
+				LOG_ARROW_ERROR(error);
+				break;
+			}
+			case BOOLOID:
+			{
+				const bool* bool_data = create_bool_data_array(table_data[i], SPI_processed);
+				arrow_arrays[i] = create_bool_array(bool_data, SPI_processed, error);
+				pfree(bool_data);
+				elog(LOG, "Created string data array");
+				LOG_ARROW_ERROR(error);
+				break;
+			}
+			case TIMESTAMPOID:
+			{
+				const int64* timestamp_data = create_timestamp_data_array(table_data[i], SPI_processed);
+				arrow_arrays[i] = create_timestamp_array(timestamp_data, SPI_processed, error);
+				pfree(timestamp_data);
 				elog(LOG, "Created string data array");
 				LOG_ARROW_ERROR(error);
 				break;

@@ -119,3 +119,10 @@ Users can choose larger chunk size depending on size of row and system memory.
       - Overal export time - 1hr 13m
       - Max Memory usage - 3.2GiB
       - 3k columnar files exported
+
+
+ - Add export timing metrics to metadata
+ - Create busy export loop in background worker
+ - Support exporting columnar files sorted by keys
+ - Cleanup extension package
+ - Figure out how to package fdw extension in pg_analytica
