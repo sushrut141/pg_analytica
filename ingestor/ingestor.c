@@ -398,11 +398,13 @@ static char** create_string_data_array(Datum* data, int num_values) {
 	char **string_data = (char**)palloc(num_values * sizeof(char*));
 	for (int i = 0; i < num_values; i += 1) {
 		if (data[i] == ULONG_MAX) {
+			char* cstring = "";
+			string_data[i] = (char*)palloc(sizeof(char));
+			strcpy(string_data[i], cstring);
+		} else {
 			char* cstring = TextDatumGetCString(data[i]);
 			string_data[i] = (char*)palloc(sizeof(char) * strlen(cstring) + 1);
 			strcpy(string_data[i], cstring);
-		} else {
-			strcpy(string_data[i], "");
 		}
 		elog(LOG, "Added value %s to array", string_data[i]);
 	}
@@ -484,6 +486,9 @@ static GArrowTable* create_arrow_table(
 			{
 				const char** string_data = create_string_data_array(table_data[i], SPI_processed);
 				arrow_arrays[i] = create_string_array(string_data, SPI_processed, error);
+				for (int k = 0; k < SPI_processed; k += 1) {
+					pfree(string_data[k]);
+				}
 				pfree(string_data);
 				elog(LOG, "Created string data array");
 				LOG_ARROW_ERROR(error);
@@ -961,10 +966,51 @@ void cleanup_inactive_export(const char *table_name) {
 	elog(LOG, "Cleaned up data for table %s", table_name);
 }
 
+void register_table_with_parquet_server(const ExportEntry *entry) {
+	StringInfoData buf;
+	initStringInfo(&buf);
+	appendStringInfo(&buf, 
+		"DROP FOREIGN TABLE IF EXISTS analytica_%s;\n", 
+		entry->table_name
+	);
+	appendStringInfo(&buf, 
+		"select import_parquet(     \
+			'analytica_%s',         \
+			'public',               \
+			'parquet_srv',          \
+			'list_parquet_files',   \
+			'{\"dir\": \"./pg_analytica/%s\"}',  \
+			'{\"use_mmap\": \"true\", \"use_threads\": \"true\"}' \
+		);", 
+		entry->table_name,
+		entry->table_name
+	);
+
+	SetCurrentStatementStartTimestamp();
+	StartTransactionCommand();
+	PushActiveSnapshot(GetTransactionSnapshot());
+	int connection = SPI_connect();
+    if (connection < 0) {
+		ereport(ERROR, (errcode(ERRCODE_CONNECTION_FAILURE),
+					errmsg("Failed to connect to database")));
+	}
+	elog(LOG, "Created connection for query");
+    elog(LOG, "Executing SPI_execute query %s", buf.data);
+    int status = SPI_execute(buf.data, /*read_only=*/false, /*count=*/0);
+    elog(LOG, "Executed SPI_execute command with status %d", status);	
+	if (status != SPI_OK_SELECT) {
+		ereport(ERROR, (errcode(ERRCODE_CONNECTION_FAILURE),
+					errmsg("Failed to register new table entry.")));
+	}
+	SPI_finish();
+	PopActiveSnapshot();
+	CommitTransactionCommand();
+}
+
 /**
  * Use SPI to read rows from table.
  * https://www.postgresql.org/docs/current/spi.html
-*/
+ */
 void
 ingestor_main()
 {
@@ -996,6 +1042,8 @@ ingestor_main()
 		export_table_data(entries[i]);
 		elog(LOG, "Updating export status");
 		update_table_export_metadata(entries[i].table_name);
+		elog(LOG, "Registering table with parqut fdw table");
+		register_table_with_parquet_server(&entries[i]);
 		elog(LOG, "Freeing export entry");
 		free_export_entry(&entries[i]);
 		elog(LOG, "Freed export entry");

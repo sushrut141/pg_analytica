@@ -121,9 +121,9 @@ Users can choose larger chunk size depending on size of row and system memory.
       - 3k columnar files exported
 
 
- - Add export timing metrics to metadata
  - Create busy export loop in background worker
- - Figure out how to package fdw extension in pg_analytica
  - test with all data types including null values
+ - Create section in readme about perf improvements
  
+ - Add export timing metrics to metadata
  - Support exporting columnar files sorted by keys

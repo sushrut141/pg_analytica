@@ -33,3 +33,15 @@ CREATE OR REPLACE FUNCTION ingestor_launch()
 RETURNS pg_catalog.int4 STRICT
 AS 'MODULE_PATHNAME'
 LANGUAGE C;
+
+-- function to list all parquet iles in data directory for table
+CREATE OR REPLACE FUNCTION list_parquet_files(args jsonb)
+returns text[] as
+$$
+begin
+    return array_agg(args->>'dir' || '/' || filename)
+           from pg_ls_dir(args->>'dir') as files(filename)
+           where filename ~~ '%.parquet';
+end
+$$
+language plpgsql;
