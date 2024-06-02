@@ -121,7 +121,6 @@ Users can choose larger chunk size depending on size of row and system memory.
       - 3k columnar files exported
 
 
- - Create busy export loop in background worker
  - test with all data types including null values
  - Create section in readme about perf improvements
  

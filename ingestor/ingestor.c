@@ -29,6 +29,7 @@
 #include "pgstat.h"
 #include "tcop/utility.h"
 #include "utils/acl.h"
+#include "utils/wait_event.h"
 #include "utils/builtins.h"
 #include "utils/snapmgr.h"
 #include "export_entry.h"
@@ -59,6 +60,12 @@ PGDLLEXPORT void ingestor_main(void) pg_attribute_noreturn();
       elog(LOG, error->message);                                               \
     }                                                                          \
   }
+
+static char source_database[] = "postgres";
+static char *source_database_role = NULL;
+// Wait 5min after a successfull export run before starting again.
+// This param can be tuned using GUC variable.
+static int	ingestor_naptime_sec = 300;
 
 static void list_current_directories() {
 	DIR *dir;
@@ -631,10 +638,6 @@ static void get_tables_to_process_in_order(ExportEntry *entries, int *num_of_tab
 					errmsg("Failed to fetch tables to export.")));
 	}
 
-	if (!SPI_processed) {
-		*num_of_tables = 0;
-		return;
-	}
 	elog(LOG, "Beginning processing of %d rows", SPI_processed);
 	int valid_entries = 0;
 
@@ -1039,36 +1042,54 @@ ingestor_main()
 	elog(LOG, "Background worker main called");
 	bits32		flags = 0;
 	BackgroundWorkerUnblockSignals();
-	BackgroundWorkerInitializeConnection("postgres", "sushrutshivaswamy", flags);
+	elog(LOG, "Establishing connection to database %s with role %s", source_database, source_database_role);
+	BackgroundWorkerInitializeConnection(source_database, source_database_role, flags);
 
-	int num_of_tables;
-	ExportEntry entries[MAX_EXPORT_ENTRIES];
-	elog(LOG, "Fetching tables to export");
-	get_tables_to_process_in_order(&entries, &num_of_tables);
-	elog(LOG, "Beginning export for %d tables", num_of_tables);
+	for (;;) {
+		/*
+		 * Background workers mustn't call usleep() or any direct equivalent:
+		 * instead, they may wait on their process latch, which sleeps as
+		 * necessary, but is awakened if postmaster dies.  That way the
+		 * background process goes away immediately in an emergency.
+		 */
+		(void) WaitLatch(MyLatch,
+						 WL_LATCH_SET | WL_TIMEOUT | WL_EXIT_ON_PM_DEATH,
+						 ingestor_naptime_sec * 1000L,
+						 PG_WAIT_EXTENSION);
+		ResetLatch(MyLatch);
 
-	for (int i = 0; i < num_of_tables; i += 1) {
-		char *table_name = entries[i].table_name;
 
-		if (entries[i].export_status == INACTIVE) {
-			elog(LOG, "Cleaning up inactive entry");
-			cleanup_inactive_export(table_name);
+		int num_of_tables;
+		ExportEntry entries[MAX_EXPORT_ENTRIES];
+		elog(LOG, "Fetching tables to export");
+		get_tables_to_process_in_order(&entries, &num_of_tables);
+		elog(LOG, "Beginning export for %d tables", num_of_tables);
+
+		for (int i = 0; i < num_of_tables; i += 1) {
+			char *table_name = entries[i].table_name;
+
+			if (entries[i].export_status == INACTIVE) {
+				elog(LOG, "Cleaning up inactive entry");
+				cleanup_inactive_export(table_name);
+				free_export_entry(&entries[i]);
+				continue;
+			}
+
+			elog(LOG, "Creating data directory for %s with %d columns", table_name, entries[i].num_of_columns);
+			setup_data_directories(table_name);
+
+			elog(LOG, "Starting export for %s", table_name);
+			export_table_data(entries[i]);
+			elog(LOG, "Updating export status");
+			update_table_export_metadata(entries[i].table_name);
+			elog(LOG, "Registering table with parqut fdw table");
+			register_table_with_parquet_server(&entries[i]);
+			elog(LOG, "Freeing export entry");
 			free_export_entry(&entries[i]);
-			continue;
+			elog(LOG, "Freed export entry");
+
+			CHECK_FOR_INTERRUPTS();
 		}
-
-		elog(LOG, "Creating data directory for %s with %d columns", table_name, entries[i].num_of_columns);
-		setup_data_directories(table_name);
-
-		elog(LOG, "Starting export for %s", table_name);
-		export_table_data(entries[i]);
-		elog(LOG, "Updating export status");
-		update_table_export_metadata(entries[i].table_name);
-		elog(LOG, "Registering table with parqut fdw table");
-		register_table_with_parquet_server(&entries[i]);
-		elog(LOG, "Freeing export entry");
-		free_export_entry(&entries[i]);
-		elog(LOG, "Freed export entry");
 	}
 	exit(0);
 }
@@ -1080,6 +1101,33 @@ ingestor_launch(PG_FUNCTION_ARGS)
 	BackgroundWorker worker;
 	BackgroundWorkerHandle *handle;
 	BgwHandleStatus status;
+
+	DefineCustomIntVariable("pg_analytica.naptime",
+								"Duration between each check (in seconds).",
+								NULL,
+								&ingestor_naptime_sec,
+								10,
+								1,
+								INT_MAX,
+								PGC_SIGHUP,
+								0,
+								NULL, NULL, NULL);
+	DefineCustomStringVariable("pg_analytica.database",
+							   "Database to connect to.",
+							   NULL,
+							   &source_database,
+							   "postgres",
+							   PGC_SIGHUP,
+							   0,
+							   NULL, NULL, NULL);
+	DefineCustomStringVariable("pg_analytica.role",
+							   "Role to connect with.",
+							   NULL,
+							   &source_database_role,
+							   NULL,
+							   PGC_SIGHUP,
+							   0,
+							   NULL, NULL, NULL);
 
 	memset(&worker, 0, sizeof(worker));
 	worker.bgw_flags = BGWORKER_SHMEM_ACCESS |
@@ -1111,8 +1159,5 @@ ingestor_launch(PG_FUNCTION_ARGS)
 	Assert(status == BGWH_STARTED);
 
 	elog(LOG, "Background worker started");
-	int bg_status = WaitForBackgroundWorkerShutdown(handle);
-	elog(LOG, "Background worker closed with status %d\n", bg_status);
-
 	PG_RETURN_INT32(pid);
 }
