@@ -4,6 +4,7 @@
 #include <unistd.h>
 #include <time.h>
 #include <dirent.h>
+#include <stdbool.h>
 
 /* Header for arrow parquet */
 #include <parquet-glib/parquet-glib.h>
@@ -116,12 +117,12 @@ GArrowArray* create_timestamp_array(const int64 *data, int num_values, GError *e
     GArrowTimestampArrayBuilder *timestamp_array_builder;
 	GTimeZone *time_zone = g_time_zone_new_utc();
 	GArrowTimestampDataType *timestamp_data_type = 
-		garrow_timestamp_data_type_new(GARROW_TIME_UNIT_MICRO, time_zone);
+		garrow_timestamp_data_type_new(GARROW_TIME_UNIT_SECOND, time_zone);
     timestamp_array_builder = garrow_timestamp_array_builder_new(timestamp_data_type);
     
     for (int i = 0; i < num_values; i++) {
         int64 value = data[i];
-        elog(LOG, "Adding value %d to arrow array", value);
+        elog(LOG, "Adding value %ld to arrow array", value);
         garrow_timestamp_array_builder_append(timestamp_array_builder, value, &inner_error);
 		LOG_ARROW_ERROR(inner_error);
         ASSIGN_IF_NOT_NULL(inner_error, error);
@@ -133,7 +134,6 @@ GArrowArray* create_timestamp_array(const int64 *data, int num_values, GError *e
 
     g_object_unref(timestamp_array_builder);
 	g_object_unref(timestamp_data_type);
-	g_object_unref(time_zone);
 
     return int_array;
 }
@@ -145,7 +145,7 @@ GArrowArray* create_double_array(const double *data, int num_values, GError *err
     
     for (int i = 0; i < num_values; i++) {
         double value = data[i];
-        elog(LOG, "Adding value %d to arrow array", value);
+        elog(LOG, "Adding value %f to arrow array", value);
         garrow_double_array_builder_append_value(double_array_builder, value, &inner_error);
 		LOG_ARROW_ERROR(inner_error);
         ASSIGN_IF_NOT_NULL(inner_error, error);
@@ -159,25 +159,25 @@ GArrowArray* create_double_array(const double *data, int num_values, GError *err
     return double_array;
 }
 
-GArrowArray* create_bool_array(const bool *data, int num_values, GError *error) {
+GArrowArray* create_bool_array(const int16 *data, int num_values, GError *error) {
     GError *inner_error = NULL;
     GArrowBooleanArrayBuilder *bool_array_builder;
     bool_array_builder = garrow_boolean_array_builder_new();
     
     for (int i = 0; i < num_values; i++) {
-        double value = data[i];
+        bool value = data[i] == 1 ? true : false;
         elog(LOG, "Adding value %d to arrow array", value);
         garrow_boolean_array_builder_append_value(bool_array_builder, value, &inner_error);
 		LOG_ARROW_ERROR(inner_error);
         ASSIGN_IF_NOT_NULL(inner_error, error);
     }
-    GArrowArray *double_array = garrow_array_builder_finish(
+    GArrowArray *bool_array = garrow_array_builder_finish(
 		GARROW_ARRAY_BUILDER(bool_array_builder), &inner_error);
 	LOG_ARROW_ERROR(inner_error);
     ASSIGN_IF_NOT_NULL(inner_error, error);
     g_object_unref(bool_array_builder);
 
-    return double_array;
+    return bool_array;
 }
 
 GArrowArray* create_string_array(const char **data, int num_values, GError *error) {
@@ -226,9 +226,6 @@ static ColumnInfo* get_column_types(const char *table_name, int* num_of_columns)
 					errmsg("Failed to deduce column types")));
 	}
 	elog(LOG, "Found %d processed rows", SPI_processed);
-	elog(LOG, "Found %d values in result", SPI_tuptable->numvals);
-	elog(LOG, "Type of column 1 is %d", SPI_tuptable->tupdesc->attrs[0].atttypid);
-	elog(LOG, "Type of column 2 is %d", SPI_tuptable->tupdesc->attrs[1].atttypid);
 	bool isnull;
 	ColumnInfo* columns = palloc_array(ColumnInfo, SPI_processed);
 	for (int i = 0; i < SPI_processed; i += 1) {
@@ -279,6 +276,7 @@ static GArrowSchema* create_table_schema(
 			}
 		}
 		Assert(column_type_found);
+		elog(LOG, "Adding column %s to schema with type %d", column_name, column_type);
 		switch (column_type) {
 			case INT2OID:
 			case INT4OID:
@@ -305,6 +303,7 @@ static GArrowSchema* create_table_schema(
 				elog(LOG, "Created schema with string %s", garrow_schema_to_string(temp));
 				break;
 			}
+			case TEXTOID:
 			case VARCHAROID:
 			{
 				GArrowDataType *string_type = garrow_string_data_type_new();
@@ -329,7 +328,8 @@ static GArrowSchema* create_table_schema(
 			}
 			case TIMESTAMPOID:
 			{
-				GArrowDataType *timestamp_type = garrow_timestamp_data_type_new(GARROW_TIME_UNIT_MICRO, &error);
+				GTimeZone *time_zone = g_time_zone_new_utc();
+				GArrowDataType *timestamp_type = garrow_timestamp_data_type_new(GARROW_TIME_UNIT_SECOND, time_zone);
     			GArrowField *timestamp_field = garrow_field_new(column_name, timestamp_type);
 				temp = garrow_schema_add_field(temp, i, timestamp_field, &error);
 				g_object_unref(timestamp_field);
@@ -369,18 +369,18 @@ static double* create_double_data_array(Datum* data, int num_values) {
 		} else {
 			double_data[i] = DatumGetFloat8(data[i]);
 		}
-		elog(LOG, "Added value %d to array", double_data[i]);
+		elog(LOG, "Added value %f to array", double_data[i]);
 	}
 	return double_data;
 }
 
-static double* create_bool_data_array(Datum* data, int num_values) {
-	double *bool_data = (bool*)palloc(num_values * sizeof(bool));
+static int16* create_bool_data_array(Datum* data, int num_values) {
+	int16 *bool_data = (int16*)palloc(num_values * sizeof(int16));
 	for (int i = 0; i < num_values; i += 1) {
 		if (data[i] == ULONG_MAX) {
-			bool_data[i] = false;
+			bool_data[i] = 0;
 		} else {
-			bool_data[i] = DatumGetBool(data[i]);
+			bool_data[i] = DatumGetBool(data[i]) ? 1 : 0;
 		}
 		elog(LOG, "Added value %d to array", bool_data[i]);
 	}
@@ -388,7 +388,7 @@ static double* create_bool_data_array(Datum* data, int num_values) {
 }
 
 static int64* create_timestamp_data_array(Datum* data, int num_values) {
-	double *timestamp_data = (bool*)palloc(num_values * sizeof(int64));
+	int64 *timestamp_data = (int64*)palloc(num_values * sizeof(int64));
 	for (int i = 0; i < num_values; i += 1) {
 		if (data[i] == ULONG_MAX) {
 			timestamp_data[i] = 0;
@@ -396,7 +396,7 @@ static int64* create_timestamp_data_array(Datum* data, int num_values) {
 			Timestamp pg_timestanp = DatumGetTimestamp(data[i]);
 			timestamp_data[i] = timestamptz_to_time_t(pg_timestanp);
 		}
-		elog(LOG, "Added value %d to array", timestamp_data[i]);
+		elog(LOG, "Added value %ld to array", timestamp_data[i]);
 	}
 	return timestamp_data;
 }
@@ -467,6 +467,7 @@ static GArrowTable* create_arrow_table(
 			}
 		}
 		Assert(column_type_found);
+		elog(LOG, "Adding values to arrow array for column %s", column_name);
 		switch (column_type) {
 			case INT2OID:
 			case INT4OID:
@@ -489,6 +490,7 @@ static GArrowTable* create_arrow_table(
 				LOG_ARROW_ERROR(error);
 				break;
 			}
+			case TEXTOID:
 			case VARCHAROID:
 			{
 				const char** string_data = create_string_data_array(table_data[i], SPI_processed);
@@ -503,10 +505,10 @@ static GArrowTable* create_arrow_table(
 			}
 			case BOOLOID:
 			{
-				const bool* bool_data = create_bool_data_array(table_data[i], SPI_processed);
+				const int16* bool_data = create_bool_data_array(table_data[i], SPI_processed);
 				arrow_arrays[i] = create_bool_array(bool_data, SPI_processed, error);
 				pfree(bool_data);
-				elog(LOG, "Created string data array");
+				elog(LOG, "Created bool data array");
 				LOG_ARROW_ERROR(error);
 				break;
 			}
@@ -515,7 +517,7 @@ static GArrowTable* create_arrow_table(
 				const int64* timestamp_data = create_timestamp_data_array(table_data[i], SPI_processed);
 				arrow_arrays[i] = create_timestamp_array(timestamp_data, SPI_processed, error);
 				pfree(timestamp_data);
-				elog(LOG, "Created string data array");
+				elog(LOG, "Created timestamp data array");
 				LOG_ARROW_ERROR(error);
 				break;
 			}
