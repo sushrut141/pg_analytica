@@ -774,6 +774,7 @@ static void setup_data_directories(const char *table_name) {
 
 /**
  * Moves columnar files from temp directory to data directory for table.
+ * Existing files in data directory are deleted.
  * Cuurently this moves files one by one so it isn't atomic.
  */
 void move_temp_files(const char *table_name) {
@@ -786,11 +787,32 @@ void move_temp_files(const char *table_name) {
 	populate_data_path_for_table(table_name, data_path, false);
 	populate_temp_path_for_table(table_name, temp_path, false);
 
+
+	// delete older parquet files in data directory
+	// This might cause issues if an existing query is reading them.
+	// There might be a way to acquire lock for file in unix.
+	dir = opendir(data_path);
+	while ((entry = readdir(dir)) != NULL) {
+		char filepath[PATH_MAX];
+		snprintf(filepath, sizeof(filepath), "%s/%s", data_path, entry->d_name);
+
+		// Skip special entries (".", "..")
+		if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
+			continue;
+		}
+		if (unlink(filepath) == -1) {
+			elog(LOG, "Failed to delete data file %s", filepath);
+		}
+		
+	}
+	closedir(dir);
+
 	dir = opendir(temp_path);
 	if (dir == NULL) {
 		perror("opendir");
 		return;
 	}
+
 	while ((entry = readdir(dir)) != NULL) {
 		if (strcmp(entry->d_name, ".") == 0 || 
 			strcmp(entry->d_name, "..") == 0) {
