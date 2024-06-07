@@ -73,14 +73,12 @@ static void list_current_directories() {
   DIR *dir;
   struct dirent *entry;
 
-  // Open the current directory (".")
   dir = opendir(".");
   if (dir == NULL) {
     perror("opendir");
     return;
   }
 
-  // Read entries from the directory
   while ((entry = readdir(dir)) != NULL) {
     // Check for "." and ".." entries
     if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
@@ -302,12 +300,11 @@ static GArrowSchema *create_table_schema(const ColumnInfo *column_info,
     case INT8OID: {
       GArrowDataType *int_type = garrow_int64_data_type_new();
       GArrowField *int_field = garrow_field_new(column_name, int_type);
+
       temp = garrow_schema_add_field(temp, i, int_field, &error);
+
       g_object_unref(int_field);
       g_object_unref(int_type);
-      elog(LOG, "Added field for int type to arrow schema for column %s",
-           column_name);
-      elog(LOG, "Created schema with string %s", garrow_schema_to_string(temp));
       break;
     }
     case FLOAT4OID:
@@ -315,35 +312,32 @@ static GArrowSchema *create_table_schema(const ColumnInfo *column_info,
       GArrowDataType *precision_type = garrow_double_data_type_new();
       GArrowField *precision_field =
           garrow_field_new(column_name, precision_type);
+
       temp = garrow_schema_add_field(temp, i, precision_field, &error);
+
       g_object_unref(precision_field);
       g_object_unref(precision_type);
-      elog(LOG, "Added field for precision type to arrow schema for column %s",
-           column_name);
-      elog(LOG, "Created schema with string %s", garrow_schema_to_string(temp));
       break;
     }
     case TEXTOID:
     case VARCHAROID: {
       GArrowDataType *string_type = garrow_string_data_type_new();
       GArrowField *string_field = garrow_field_new(column_name, string_type);
+
       temp = garrow_schema_add_field(temp, i, string_field, &error);
+
       g_object_unref(string_field);
       g_object_unref(string_type);
-      elog(LOG, "Added field for string type to arrow schema for column %s",
-           column_name);
-      elog(LOG, "Created schema with string %s", garrow_schema_to_string(temp));
       break;
     }
     case BOOLOID: {
       GArrowDataType *bool_type = garrow_boolean_data_type_new();
       GArrowField *bool_field = garrow_field_new(column_name, bool_type);
+
       temp = garrow_schema_add_field(temp, i, bool_field, &error);
+
       g_object_unref(bool_field);
       g_object_unref(bool_type);
-      elog(LOG, "Added field for boolean type to arrow schema for column %s",
-           column_name);
-      elog(LOG, "Created schema with string %s", garrow_schema_to_string(temp));
       break;
     }
     case TIMESTAMPOID: {
@@ -352,12 +346,11 @@ static GArrowSchema *create_table_schema(const ColumnInfo *column_info,
           garrow_timestamp_data_type_new(GARROW_TIME_UNIT_SECOND, time_zone);
       GArrowField *timestamp_field =
           garrow_field_new(column_name, timestamp_type);
+
       temp = garrow_schema_add_field(temp, i, timestamp_field, &error);
+
       g_object_unref(timestamp_field);
       g_object_unref(timestamp_type);
-      elog(LOG, "Added field for timestamp type to arrow schema for column %s",
-           column_name);
-      elog(LOG, "Created schema with string %s", garrow_schema_to_string(temp));
       break;
     }
     default:
@@ -379,7 +372,6 @@ static int64 *create_int64_data_array(Datum *data, int num_values) {
     } else {
       int_data[i] = DatumGetInt64(data[i]);
     }
-    elog(LOG, "Added value %d to array", int_data[i]);
   }
   return int_data;
 }
@@ -392,7 +384,6 @@ static double *create_double_data_array(Datum *data, int num_values) {
     } else {
       double_data[i] = DatumGetFloat8(data[i]);
     }
-    elog(LOG, "Added value %f to array", double_data[i]);
   }
   return double_data;
 }
@@ -405,7 +396,6 @@ static int16 *create_bool_data_array(Datum *data, int num_values) {
     } else {
       bool_data[i] = DatumGetBool(data[i]) ? 1 : 0;
     }
-    elog(LOG, "Added value %d to array", bool_data[i]);
   }
   return bool_data;
 }
@@ -419,7 +409,6 @@ static int64 *create_timestamp_data_array(Datum *data, int num_values) {
       Timestamp pg_timestanp = DatumGetTimestamp(data[i]);
       timestamp_data[i] = timestamptz_to_time_t(pg_timestanp);
     }
-    elog(LOG, "Added value %ld to array", timestamp_data[i]);
   }
   return timestamp_data;
 }
@@ -436,7 +425,6 @@ static char **create_string_data_array(Datum *data, int num_values) {
       string_data[i] = (char *)palloc(sizeof(char) * strlen(cstring) + 1);
       strcpy(string_data[i], cstring);
     }
-    elog(LOG, "Added value %s to array", string_data[i]);
   }
   return string_data;
 }
@@ -473,8 +461,6 @@ static GArrowTable *create_arrow_table(GArrowSchema *schema,
       }
     }
   }
-  elog(LOG, "Populated datums in temp memory");
-  // TODO - handle error
   GError *error = NULL;
   // Populate arrow arrays for each column
   for (int i = 0; i < num_export_columns; i += 1) {
@@ -1044,7 +1030,7 @@ void register_table_with_parquet_server(const ExportEntry *entry) {
  * https://www.postgresql.org/docs/current/spi.html
  */
 void ingestor_main() {
-  elog(LOG, "Background worker main called");
+  elog(LOG, "Started export in background worker");
   bits32 flags = 0;
   BackgroundWorkerUnblockSignals();
   elog(LOG, "Establishing connection to database %s with role %s",
@@ -1067,31 +1053,36 @@ void ingestor_main() {
     ExportEntry entries[MAX_EXPORT_ENTRIES];
     elog(LOG, "Fetching tables to export");
     get_tables_to_process_in_order(&entries, &num_of_tables);
+
     elog(LOG, "Beginning export for %d tables", num_of_tables);
 
     for (int i = 0; i < num_of_tables; i += 1) {
       char *table_name = entries[i].table_name;
 
       if (entries[i].export_status == INACTIVE) {
-        elog(LOG, "Cleaning up inactive entry");
+        elog(LOG, "Cleaning up inactive entry %s", entries[i].table_name);
         cleanup_inactive_export(table_name);
         free_export_entry(&entries[i]);
         continue;
       }
 
-      elog(LOG, "Creating data directory for %s with %d columns", table_name,
-           entries[i].num_of_columns);
+      elog(LOG, "Initializing data directory for %s with %d columns",
+           table_name, entries[i].num_of_columns);
       setup_data_directories(table_name);
 
       elog(LOG, "Starting export for %s", table_name);
       export_table_data(entries[i]);
-      elog(LOG, "Updating export status");
+
+      elog(LOG, "Updating export status for %s", table_name);
       update_table_export_metadata(entries[i].table_name);
-      elog(LOG, "Registering table with parqut fdw table");
+
+      elog(LOG, "Registering table with parqut fdw table %s", table_name);
       register_table_with_parquet_server(&entries[i]);
+
       elog(LOG, "Freeing export entry");
       free_export_entry(&entries[i]);
-      elog(LOG, "Freed export entry");
+
+      elog(LOG, "Export completed for %s", table_name);
 
       CHECK_FOR_INTERRUPTS();
     }
@@ -1119,7 +1110,7 @@ Datum ingestor_launch(PG_FUNCTION_ARGS) {
   worker.bgw_flags =
       BGWORKER_SHMEM_ACCESS | BGWORKER_BACKEND_DATABASE_CONNECTION;
   worker.bgw_start_time = BgWorkerStart_RecoveryFinished;
-  worker.bgw_restart_time = BGW_NEVER_RESTART;
+  worker.bgw_restart_time = BGW_DEFAULT_RESTART_INTERVAL;
   sprintf(worker.bgw_library_name, "ingestor");
   sprintf(worker.bgw_function_name, "ingestor_main");
   snprintf(worker.bgw_name, BGW_MAXLEN, "ingestor dynamic worker");
