@@ -1,4 +1,5 @@
-# Notes on pg_analytica extension
+## Rough Notes on pg_analytica extension
+
 
 ## Approach 1
 
@@ -23,6 +24,7 @@ Maybe we can keep track of the oldest txn id ingested and query rows with txn id
         - Citus maps columnar storage concepts to postgres concepts like pages
         - `CatalogTupleInsert` is called at the end to insert table information into postgres catalog
 
+## Approach 2
      - Table Access Manager definition only support row by row insert for `CREATE TABLE AS` queries
         - Multi-insert is only called if data is dumped to disk and read as a file
         - `CTAS` appoach to create columnar store may not work

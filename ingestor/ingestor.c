@@ -858,18 +858,15 @@ void move_temp_files(const char *table_name) {
 
 char *get_columns_string(char **columns, int num_of_columns) {
   int total_size = 0;
-  elog(LOG, "Creating stringified columns");
   for (int i = 0; i < num_of_columns; i++) {
     char *column_name = columns[i];
     total_size += strlen(column_name) + 1;
     elog(LOG, "Size of column %s is %d", column_name, strlen(column_name));
   }
   char *combined_string = (char *)palloc(total_size * sizeof(char));
-  elog(LOG, "Allocated memory");
   combined_string[0] = '\0';
   for (int i = 0; i < num_of_columns; i++) {
     strcat(combined_string, columns[i]);
-    elog(LOG, "Creating combined string %s", combined_string);
     if (i < num_of_columns - 1) {
       strcat(combined_string, ",");
     }
