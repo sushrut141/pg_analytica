@@ -1,3 +1,4 @@
+#include "postgres.h"
 #include "access/xact.h"
 #include "catalog/pg_type_d.h"
 #include "constants.h"
