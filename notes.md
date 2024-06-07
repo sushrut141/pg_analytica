@@ -76,6 +76,9 @@ SELECT * from read_parquet('/opt/homebrew/var/postgresql@14/sample.parquet');
 
 # Query timings
 
+
+### Test 1
+
 Measured using the timing feature in postgres.
  - Table Size little over 2GiB
     - 30M rows with 2 int64 columns and a varchar column exported
@@ -105,7 +108,61 @@ GROUP BY age;
 Time: 5153.393 ms (00:05.153)
 ```
 
- ## Export timings
+### Test 2
+
+Measured using the timing feature in postgres.
+ - Table Size little over 5GiB
+    - 60M rows with 6 columns of different types
+
+ 
+```
+\timing on
+
+
+-- Query on row based data
+SELECT 
+    age,
+    COUNT(*) 
+FROM test_data
+WHERE age > 50 AND age < 90 AND is_random
+GROUP BY age;
+
+Time: 9446.380 ms (00:09.446)
+
+-- Query on columnar data
+SELECT 
+    age,
+    COUNT(*) 
+FROM analytica_test_data
+WHERE age > 50 AND age < 90 AND is_random
+GROUP BY age;
+
+Time: 2312.845 ms (00:02.313)
+
+postgres=# \timing on
+Timing is on.
+postgres=# SELECT COUNT(*) from analytica_test_data WHERE age > 50 AND age < 55;
+  count  
+---------
+ 2398998
+(1 row)
+
+Time: 1399.673 ms (00:01.400)
+
+
+postgres=# SELECT COUNT(*) from test_data WHERE age > 50 AND age < 55;
+  count  
+---------
+ 2399709
+(1 row)
+
+Time: 9904.160 ms (00:09.904)
+
+```
+
+## Export timings
+
+### Test 1
 
 Time to export can be reduced with variable exort chunk sizes.
 Users can choose larger chunk size depending on size of row and system memory.
@@ -120,8 +177,25 @@ Users can choose larger chunk size depending on size of row and system memory.
       - Max Memory usage - 3.2GiB
       - 3k columnar files exported
 
+### Test 2
 
+- Table Size little over 5GiB
+  - export chunk size 100k
+  - Started at 8:47 PM
+  - Peak memory usage steadily growing, currently at 9GiB
+    - possible memory leak
+  - memory usage at 9.82GiB
+  - Completed at 9:34 PM
+  - Peak memory usage 10.35GiB
+  - 40min to export 5GiB of data
+  - 600 columnar files exported
+
+## Tasks
+
+ - Look into memory usage increase
+  - see if using cursors to read chunks reduces memory usage
+  - check for memory leaks
  - Create section in readme about perf improvements
- 
+
  - Add export timing metrics to metadata
  - Support exporting columnar files sorted by keys
