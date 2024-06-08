@@ -16,4 +16,4 @@ SELECT
   floor(random() * 100) + 18 AS age,  -- Generate random ages between 18-117
   random() < 0.5 as is_random,
   random() as rating
-FROM generate_series(1, 60000000);
+FROM generate_series(1, 10000000);

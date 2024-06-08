@@ -21,7 +21,7 @@ Installation instructions for various platforms can be found on the [Apache Arro
 
 The extension relies on the [parquet_fdw](https://github.com/adjust/parquet_fdw) extension to query the exported columnar data. Follow the [installation](https://github.com/adjust/parquet_fdw?tab=readme-ov-file#installation) instructions on the repo.
 
-Ensure that the extension is loaded before procedding with next steps.
+Ensure that the extension is loaded before proceeding with next steps.
 Running the query below within a psql session should show that the extension is installed.
 
 ```
@@ -67,11 +67,26 @@ postgres=# SELECT register_table_export(
     -- table name
     'your_table_name', 
     -- list of columns to export
-    '{column_1,Column_2,column_3}',
+    '{column_1,column_2,column_3}',
     -- Hours after which table data will be re-exported
     10
 );
 ```
+
+*pg_analytica* supports the following column types currently.
+
+| PG Type        | Support               |
+| -------------- | --------------------- |
+| smallint       | :white_check_mark     |
+| integer        | :white_check_mark     |
+| bigint         | :white_check_mark     |
+| float          | :white_check_mark     |
+| double         | :white_check_mark     |
+| boolean        | :white_check_mark     |
+| varchar        | :white_check_mark     |
+| text           | :white_check_mark     |
+| boolean        | :white_check_mark     |
+| timestamp      | :white_check_mark     |
 
 ### Start the export background worker
 
@@ -103,6 +118,7 @@ postgres=# SELECT * FROM analytica_test_data;
 ### Benchmarks
 
 The extension was tested on a Postgres instance running on an M1 Air Macbook. To see the table used for testing see [here](./ingestor/generate_test_data.sql).
+Speed ups in querying columnar store vary based on the query but tests indicate upto 90% decease in query latency!
 
 
 ### Test 1
@@ -113,20 +129,10 @@ Measured using the timing feature in postgres.
 
 ```
 \timing on
-```
 
- - select with group by and filter
-```
-SELECT 
-    age,
-    COUNT(*) 
-FROM analytica_test_data
-WHERE age > 50 AND age < 90 AND id > 1000
-GROUP BY age;
 
-Time: 1633.900 ms (00:01.634)
-
-SELECT 
+-- Query on row based data
+postgres=# SELECT 
     age,
     COUNT(*) 
 FROM test_data
@@ -134,6 +140,17 @@ WHERE age > 50 AND age < 90 AND id > 1000
 GROUP BY age;
 
 Time: 5153.393 ms (00:05.153)
+
+
+-- Query on columnar data
+postgres=# SELECT 
+    age,
+    COUNT(*) 
+FROM analytica_test_data
+WHERE age > 50 AND age < 90 AND id > 1000
+GROUP BY age;
+
+Time: 1633.900 ms (00:01.634)
 ```
 
 ### Test 2
@@ -156,6 +173,7 @@ GROUP BY age;
 
 Time: 9446.380 ms (00:09.446)
 
+
 -- Query on columnar data
 SELECT 
     age,
@@ -177,6 +195,7 @@ postgres=# SELECT COUNT(*) from test_data WHERE age > 50 AND age < 55;
 (1 row)
 
 Time: 9904.160 ms (00:09.904)
+
 
 -- Query on columnar data
 postgres=# SELECT COUNT(*) from analytica_test_data WHERE age > 50 AND age < 55;
