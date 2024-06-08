@@ -75,18 +75,17 @@ postgres=# SELECT register_table_export(
 
 *pg_analytica* supports the following column types currently.
 
-| PG Type        | Support               |
-| -------------- | --------------------- |
-| smallint       | :white_check_mark     |
-| integer        | :white_check_mark     |
-| bigint         | :white_check_mark     |
-| float          | :white_check_mark     |
-| double         | :white_check_mark     |
-| boolean        | :white_check_mark     |
-| varchar        | :white_check_mark     |
-| text           | :white_check_mark     |
-| boolean        | :white_check_mark     |
-| timestamp      | :white_check_mark     |
+| PG Type        | Support                |
+| -------------- | ---------------------- |
+| smallint       | :white_check_mark:     |
+| integer        | :white_check_mark:     |
+| bigint         | :white_check_mark:     |
+| float          | :white_check_mark:     |
+| double         | :white_check_mark:     |
+| varchar        | :white_check_mark:     |
+| text           | :white_check_mark:     |
+| boolean        | :white_check_mark:     |
+| timestamp      | :white_check_mark:     |
 
 ### Start the export background worker
 
